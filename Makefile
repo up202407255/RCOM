@@ -2,26 +2,29 @@
 # NOTE: This file must not be changed.
 
 # Parameters
-CC = gcc
-CFLAGS = -Wall
+CC := gcc
+CFLAGS := -Wall
 
-BIN = bin/
-CABLE = cable/
-SRC = src/
+BIN := bin
+CABLE := cable
+SRC := src
 
-TX_SERIAL_PORT = /tmp/ttyS10
-RX_SERIAL_PORT = /tmp/ttyS11
-BAUD_RATE = 9600
+TX_SERIAL_PORT := /tmp/ttyS10
+RX_SERIAL_PORT := /tmp/ttyS11
+BAUD_RATE := 9600
 
-TX_FILE = penguin.gif
-RX_FILE = penguin-received.gif
+TX_FILE := penguin.gif
+RX_FILE := penguin-received.gif
 
-# Main
+# All
 .PHONY: all
 all: main cable
 
-main: $(SRC)/*.c | bin_dir
-	$(CC) $(CFLAGS) -o $(BIN)/$@ $^
+# Main
+MAIN_EXE := $(BIN)/main
+main: $(MAIN_EXE)
+$(MAIN_EXE): $(SRC)/*.c | $(BIN)
+	$(CC) $(CFLAGS) -o $@ $^
 
 .PHONY: run_tx
 run_tx: main
@@ -37,17 +40,18 @@ check_files:
 	diff -s $(TX_FILE) $(RX_FILE) || exit 0
 
 # Cable
-cable: $(CABLE)/cable.c
-	$(CC) $(CFLAGS) -o $(BIN)/$@ $^
+CABLE_EXE := $(BIN)/cable
+cable: $(CABLE_EXE)
+$(CABLE_EXE): $(CABLE)/cable.c | $(BIN)
+	$(CC) $(CFLAGS) -o $@ $^
 
 .PHONY: run_cable
 run_cable: cable
 	@which socat || { echo "Error: Could not find socat. Install socat and try again."; exit 1; }
-	./$(BIN)/cable
+	sudo ./$(BIN)/cable
 
 # Create bin directory
-.PHONY: bin_dir
-bin_dir:
+$(BIN):
 	mkdir -p $(BIN)
 
 # Clean
