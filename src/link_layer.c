@@ -141,10 +141,7 @@ int llOpenTx(LinkLayer llParameters)
 
 int llOpenRx(LinkLayer llParameters)
 {
-    // ----------------------------------------------------
-    // Open the serial port and wait for a valid SET frame.
-    // ----------------------------------------------------
-
+    // Open serial port
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -153,29 +150,19 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
+    // Initialize state machine to receive SET
+    StateMachine sm;
+    stateMachineInit(&sm, A, C_SET);
 
-    // States used to recognize the SET frame
-    enum
-    {
-        START,
-        FLAG_RCV,
-        A_RCV,
-        C_RCV,
-        BCC_OK
-    };
-
-    int state = START;
-
-    volatile int STOP = FALSE;
     int nBytesBuf = 0;
 
-    while (STOP == FALSE)
+    // Wait until a valid SET frame is received
+    while (sm.state != STOP)
     {
-        // Read one byte from serial port
         unsigned char byte;
+
         int bytes = readByteSerialPort(&byte);
 
-        // Check if a byte was actually read
         if (bytes < 0)
         {
             perror("readByteSerialPort");
@@ -191,47 +178,8 @@ int llOpenRx(LinkLayer llParameters)
 
         printf("Byte received: 0x%02X\n", byte);
 
-        // State machine to detect SET:
-        // 7E 03 03 00 7E
-        switch (state)
-        {
-            case START:
-                if (byte == FLAG)
-                    state = FLAG_RCV;
-                break;
-
-            case FLAG_RCV:
-                if (byte == A_TX)
-                    state = A_RCV;
-                else if (byte != FLAG)
-                    state = START;
-                break;
-
-            case A_RCV:
-                if (byte == C_SET)
-                    state = C_RCV;
-                else if (byte == FLAG)
-                    state = FLAG_RCV;
-                else
-                    state = START;
-                break;
-
-            case C_RCV:
-                if (byte == (A_TX ^ C_SET))
-                    state = BCC_OK;
-                else if (byte == FLAG)
-                    state = FLAG_RCV;
-                else
-                    state = START;
-                break;
-
-            case BCC_OK:
-                if (byte == FLAG)
-                    STOP = TRUE;
-                else
-                    state = START;
-                break;
-        }
+        // Process received byte using the state machine
+        stateMachineProcessByte(&sm, byte);
     }
 
     printf("SET received correctly\n");
@@ -241,21 +189,22 @@ int llOpenRx(LinkLayer llParameters)
     unsigned char uaFrame[5];
 
     uaFrame[0] = FLAG;
-    uaFrame[1] = A_RX;
+    uaFrame[1] = A;
     uaFrame[2] = C_UA;
-    uaFrame[3] = A_RX ^ C_UA;
+    uaFrame[3] = A ^ C_UA;
     uaFrame[4] = FLAG;
 
-    // Send UA
+    // Send UA frame
     int bytesWritten = writeBytesSerialPort(uaFrame, 5);
 
     if (bytesWritten < 0)
     {
         perror("writeBytesSerialPort");
         return -1;
-    }   
+    }
 
     printf("%d bytes written to serial port\n", bytesWritten);
+    printf("UA sent\n");
 
     return 0;
 }
