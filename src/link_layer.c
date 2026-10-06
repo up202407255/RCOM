@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <signal.h> 
 
 // MISC
 #define _POSIX_SOURCE 1 // POSIX compliant source
@@ -16,6 +17,13 @@
 #define A 0x03
 #define C_SET 0x03
 #define C_UA 0x07
+
+int alarmEnabled = FALSE;
+
+void alarmHandler(int signal)
+{
+    alarmEnabled = FALSE;
+}
 
 ////////////////////////////////////////////////
 // LLOPEN
@@ -30,6 +38,16 @@ int llOpenTx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
+    // Configura o alarme
+    struct sigaction act = {0};
+    act.sa_handler = &alarmHandler;
+
+    if (sigaction(SIGALRM, &act, NULL) == -1)
+    {
+        perror("sigaction");
+        return -1;
+    }
+
     // Cria o frame SET com 5 bytes
     unsigned char SET[5];
 
@@ -39,49 +57,74 @@ int llOpenTx(LinkLayer llParameters)
     SET[3] = SET[1] ^ SET[2]; // BCC1: XOR entre A e C
     SET[4] = 0x7E; // FLAG final
 
-    // Envia o frame SET para o recetor
-    int bytesWritten = writeBytesSerialPort(SET, 5);
-    printf("%d bytes written to serial port\n", bytesWritten);
-
     // Cria espaço para guardar o frame UA recebido
     unsigned char UA[5];
 
-    // Lê os 5 bytes do frame UA
-    for (int i = 0; i < 5; i++)
+    int attempts = 0;
+    int connected = FALSE;
+
+    while (attempts < 3  && connected == FALSE)
     {
-        int bytesRead = readByteSerialPort(&UA[i]);
-        // Verifica se foi lido um byte
-        if (bytesRead != 1)
+        attempts++;
+
+        // Envia o frame SET para o recetor
+        int bytesWritten = writeBytesSerialPort(SET, 5);
+        printf("%d bytes written to serial port\n", bytesWritten);
+    
+        // Ativa o alarme durante 3 segundos
+        alarmEnabled = TRUE;
+        alarm(3);  
+
+        // Tenta receber o UA 
+        for (int i = 0; i < 5; i++)
         {
-            printf("Error reading UA\n");
-            return -1;
+            int bytesRead = readByteSerialPort(&UA[i]);
+            // Verifica se foi lido um byte
+            if (bytesRead != 1)
+            {
+                break;
+            }
         }
+
+        // Verifica se ocorreu timeout
+        if (alarmEnabled == FALSE)
+        {
+            printf("Timeout. Retrying...\n");
+            continue;
+        }
+
+        // Verifica se o frame UA recebido está correto
+        if (UA[0] == 0x7E &&
+            UA[1] == 0x01 &&
+            UA[2] == 0x07 &&
+            UA[3] == (UA[1] ^ UA[2]) &&
+            UA[4] == 0x7E)
+        {
+            connected = TRUE;
+            // O UA chegou, por isso já não precisamos do alarme
+            alarm(0);
+            alarmEnabled = FALSE;
+        }
+
+    }
+
+    // Se não conseguiu receber um UA válido após 3 tentativas
+    if (connected == FALSE)
+    {
+        printf("Failed to receive UA after 3 attempts\n");
+        closeSerialPort();
+        return -1;
     }
 
     // Mostra o UA recebido em hexadecimal
     printf("UA received: ");
-
     for (int i = 0; i < 5; i++)
     {
         printf("0x%02X ", UA[i]);
     }
-
     printf("\n");
 
-    // Verifica se o frame UA recebido está correto
-    if (UA[0] == 0x7E &&
-    UA[1] == 0x01 &&
-    UA[2] == 0x07 &&
-    UA[3] == (UA[1] ^ UA[2]) &&
-    UA[4] == 0x7E)
-    {
-        printf("UA received correctly\n");
-    }
-    else
-    {
-        printf("Invalid UA\n");
-        return -1;
-    }
+    printf("UA received correctly\n");
 
     // Close serial port
     if (closeSerialPort() < 0)
