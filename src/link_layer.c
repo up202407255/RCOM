@@ -217,7 +217,7 @@ int llOpenRx(LinkLayer llParameters)
                 break;
 
             case C_RCV:
-                if (byte == (A ^ C_SET))
+                if (byte == (A_TX ^ C_SET))
                     state = BCC_OK;
                 else if (byte == FLAG)
                     state = FLAG_RCV;
