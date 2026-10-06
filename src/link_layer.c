@@ -17,11 +17,6 @@
 ////////////////////////////////////////////////
 int llOpenTx(LinkLayer llParameters)
 {
-    // ----------------------------------------------------
-    // This example code shows how to open the serial port and send a string.
-    // TODO: Adapt and extend this code according to the specifications of the project.
-    // ----------------------------------------------------
-
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -30,24 +25,58 @@ int llOpenTx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Create string to send
-    unsigned char buf[BUF_SIZE] = {0};
+    // Cria o frame SET com 5 bytes
+    unsigned char SET[5];
 
-    for (int i = 0; i < BUF_SIZE; i++)
+    SET[0] = 0x7E; // FLAG inicial
+    SET[1] = 0x03; // Endereço do emissor
+    SET[2] = 0x03; // Campo de controlo: SET
+    SET[3] = SET[1] ^ SET[2]; // BCC1: XOR entre A e C
+    SET[4] = 0x7E; // FLAG final
+
+    // Envia o frame SET para o recetor
+    int bytesWritten = writeBytesSerialPort(SET, 5);
+    printf("%d bytes written to serial port\n", bytesWritten);
+
+    // Cria espaço para guardar o frame UA recebido
+    unsigned char UA[5];
+
+    // Lê os 5 bytes do frame UA
+    for (int i = 0; i < 5; i++)
     {
-        buf[i] = 'a' + i % 26;
+        int bytesRead = readByteSerialPort(&UA[i]);
+        // Verifica se foi lido um byte
+        if (bytesRead != 1)
+        {
+            printf("Error reading UA\n");
+            return -1;
+        }
     }
 
-    // In non-canonical mode, '\n' does not end the writing.
-    // Test this condition by placing a '\n' in the middle of the buffer.
-    // The whole buffer must be sent even with the '\n'.
-    buf[5] = '\n';
+    // Mostra o UA recebido em hexadecimal
+    printf("UA received: ");
 
-    int bytes = writeBytesSerialPort(buf, BUF_SIZE);
-    printf("%d bytes written to serial port\n", bytes);
+    for (int i = 0; i < 5; i++)
+    {
+        printf("0x%02X ", UA[i]);
+    }
 
-    // Wait until all bytes have been written to the serial port
-    sleep(1);
+    printf("\n");
+
+    // Verifica se o frame UA recebido está correto
+    if (UA[0] == 0x7E &&
+    UA[1] == 0x01 &&
+    UA[2] == 0x07 &&
+    UA[3] == (UA[1] ^ UA[2]) &&
+    UA[4] == 0x7E)
+    {
+        printf("UA received correctly\n");
+    }
+    else
+    {
+        printf("Invalid UA\n");
+        return -1;
+    }
 
     // Close serial port
     if (closeSerialPort() < 0)
