@@ -14,7 +14,8 @@
 #define BUF_SIZE 256
 
 #define FLAG 0x7E
-#define A 0x03
+#define A_TX 0x03
+#define A_RX 0x01
 #define C_SET 0x03
 #define C_UA 0x07
 
@@ -200,7 +201,7 @@ int llOpenRx(LinkLayer llParameters)
                 break;
 
             case FLAG_RCV:
-                if (byte == A)
+                if (byte == A_TX)
                     state = A_RCV;
                 else if (byte != FLAG)
                     state = START;
@@ -240,9 +241,9 @@ int llOpenRx(LinkLayer llParameters)
     unsigned char uaFrame[5];
 
     uaFrame[0] = FLAG;
-    uaFrame[1] = A;
+    uaFrame[1] = A_RX;
     uaFrame[2] = C_UA;
-    uaFrame[3] = A ^ C_UA;
+    uaFrame[3] = A_RX ^ C_UA;
     uaFrame[4] = FLAG;
 
     // Send UA
