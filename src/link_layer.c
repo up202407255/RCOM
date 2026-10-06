@@ -12,6 +12,11 @@
 #define _POSIX_SOURCE 1 // POSIX compliant source
 #define BUF_SIZE 256
 
+#define FLAG 0x7E
+#define A 0x03
+#define C_SET 0x03
+#define C_UA 0x07
+
 ////////////////////////////////////////////////
 // LLOPEN
 ////////////////////////////////////////////////
@@ -93,8 +98,7 @@ int llOpenTx(LinkLayer llParameters)
 int llOpenRx(LinkLayer llParameters)
 {
     // ----------------------------------------------------
-    // This example code shows how to open the serial port and receive a string.
-    // TODO: Adapt and extend this code according to the specifications of the project.
+    // Open the serial port and wait for a valid SET frame.
     // ----------------------------------------------------
 
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
@@ -105,43 +109,109 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Read from serial port until the 'z' char is received.
 
-    // NOTE: This while() cycle is a simple example showing how to read from the serial port.
-    // It must be changed in order to respect the specifications of the protocol indicated in the Lab guide.
+    // States used to recognize the SET frame
+    enum
+    {
+        START,
+        FLAG_RCV,
+        A_RCV,
+        C_RCV,
+        BCC_OK
+    };
 
-    // TODO: Save the received bytes in a buffer array and print it at the end of the program.
+    int state = START;
+
     volatile int STOP = FALSE;
     int nBytesBuf = 0;
 
     while (STOP == FALSE)
     {
-        // Read one byte from serial port.
-        // NOTE: You must check how many bytes were actually read by reading the return value.
-        // In this example, we assume that the byte is always read, which may not be true.
+        // Read one byte from serial port
         unsigned char byte;
         int bytes = readByteSerialPort(&byte);
+
+        // Check if a byte was actually read
+        if (bytes < 0)
+        {
+            perror("readByteSerialPort");
+            return -1;
+        }
+
+        if (bytes == 0)
+        {
+            continue;
+        }
+
         nBytesBuf += bytes;
 
-        printf("Byte received: %c\n", byte);
+        printf("Byte received: 0x%02X\n", byte);
 
-        if (byte == 'z')
+        // State machine to detect SET:
+        // 7E 03 03 00 7E
+        switch (state)
         {
-            printf("Received 'z' char. Stop reading from serial port.\n");
-            STOP = TRUE;
+            case START:
+                if (byte == FLAG)
+                    state = FLAG_RCV;
+                break;
+
+            case FLAG_RCV:
+                if (byte == A)
+                    state = A_RCV;
+                else if (byte != FLAG)
+                    state = START;
+                break;
+
+            case A_RCV:
+                if (byte == C_SET)
+                    state = C_RCV;
+                else if (byte == FLAG)
+                    state = FLAG_RCV;
+                else
+                    state = START;
+                break;
+
+            case C_RCV:
+                if (byte == (A ^ C_SET))
+                    state = BCC_OK;
+                else if (byte == FLAG)
+                    state = FLAG_RCV;
+                else
+                    state = START;
+                break;
+
+            case BCC_OK:
+                if (byte == FLAG)
+                    STOP = TRUE;
+                else
+                    state = START;
+                break;
         }
     }
 
+    printf("SET received correctly\n");
     printf("Total bytes received: %d\n", nBytesBuf);
 
-    // Close serial port
-    if (closeSerialPort() < 0)
-    {
-        perror("closeSerialPort");
-        return -1;
-    }
+    // Build UA frame
+    unsigned char uaFrame[5];
 
-    printf("Serial port %s closed\n", llParameters.serialPort);
+    uaFrame[0] = FLAG;
+    uaFrame[1] = A;
+    uaFrame[2] = C_UA;
+    uaFrame[3] = A ^ C_UA;
+    uaFrame[4] = FLAG;
+
+    // Send UA
+    int bytesWritten = writeBytesSerialPort(uaFrame, 5);
+
+    if (bytesWritten < 0)
+    {
+        perror("writeBytesSerialPort");
+        return -1;
+    }   
+
+    printf("%d bytes written to serial port\n", bytesWritten);
 
     return 0;
 }
