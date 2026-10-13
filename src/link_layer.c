@@ -25,6 +25,7 @@ int alarmEnabled = FALSE;
 void alarmHandler(int signal)
 {
     alarmEnabled = FALSE;
+    printf("Timeout. Retrying...\n");
 }
 
 ////////////////////////////////////////////////
@@ -59,11 +60,9 @@ int llOpenTx(LinkLayer llParameters)
     SET[3] = SET[1] ^ SET[2]; // BCC1: XOR entre A e C
     SET[4] = 0x7E; // FLAG final
 
-    // Cria espaço para guardar o frame UA recebido
-    unsigned char UA[5]={0};
-
     int attempts = 0;
     int connected = FALSE;
+    int state;
 
     while (attempts < 3  && connected == FALSE)
     {
@@ -78,58 +77,69 @@ int llOpenTx(LinkLayer llParameters)
         alarm(3);  
 
         // Tenta receber o UA
-        int received = 0;
 
-        for (int i = 0; i < 5; i++)
+        state = 0;
+
+        while (alarmEnabled && state != 5)
         {
-            int bytesRead = readByteSerialPort(&UA[i]);
+            unsigned char byte;
+            int bytesRead = readByteSerialPort(&byte);
 
             if (bytesRead != 1)
+                continue;
+
+            printf("Byte received: 0x%02X\n", byte);
+
+            switch (state)
             {
-                break;
+                case 0:
+                    if (byte == FLAG)
+                        state = 1;
+                    break;
+
+                case 1:
+                    if (byte == A_RX)
+                        state = 2;
+                    else if (byte != FLAG)
+                        state = 0;
+                    break;
+
+                case 2:
+                    if (byte == C_UA)
+                        state = 3;
+                    else if (byte == FLAG)
+                        state = 1;
+                    else
+                        state = 0;
+                    break;
+
+                case 3:
+                    if (byte == (A_RX ^ C_UA))
+                        state = 4;
+                    else if (byte == FLAG)
+                        state = 1;
+                    else
+                        state = 0;
+                    break;
+
+                case 4:
+                    if (byte == FLAG)
+                        state = 5;
+                    else
+                        state = 0;
+                    break;
             }
-
-            received++;
         }
 
-        if (received == 5)
-        {
-            printf("UA received: ");
-
-            for (int i = 0; i < 5; i++)
-            {
-                printf("0x%02X ", UA[i]);
-            }
-
-            printf("\n");
-        }
-        else
-        {
-            printf("No complete UA received\n");
-        }
-
-        // Verifica se ocorreu timeout
-        if (alarmEnabled == FALSE)
-        {
-            printf("Timeout. Retrying...\n");
-            continue;
-        }
-
-        // Verifica se o frame UA recebido está correto
-        if (received == 5 &&
-            UA[0] == FLAG &&
-            UA[1] == A_RX &&
-            UA[2] == C_UA &&
-            UA[3] == (A_RX ^ C_UA) &&
-            UA[4] == FLAG)
+        if (state == 5)
         {
             connected = TRUE;
-            // O UA chegou, por isso já não precisamos do alarme
             alarm(0);
             alarmEnabled = FALSE;
+            printf("UA received correctly\n");
         }
-
-    }
+        
+    }    
 
     // Se não conseguiu receber um UA válido após 3 tentativas
     if (connected == FALSE)
@@ -138,17 +148,6 @@ int llOpenTx(LinkLayer llParameters)
         closeSerialPort();
         return -1;
     }
-
-    // Mostra o UA recebido em hexadecimal
-    printf("UA received: ");
-    for (int i = 0; i < 5; i++)
-    {
-        printf("0x%02X ", UA[i]);
-    }
-    printf("\n");
-
-    printf("UA received correctly\n");
-
 
     return 0;
 }
