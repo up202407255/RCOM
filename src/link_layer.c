@@ -88,6 +88,15 @@ int llOpenTx(LinkLayer llParameters)
             }
         }
 
+        printf("UA received: ");
+
+        for (int i = 0; i < 5; i++)
+        {
+            printf("0x%02X ", UA[i]);
+        }
+
+        printf("\n");
+
         // Verifica se ocorreu timeout
         if (alarmEnabled == FALSE)
         {
@@ -96,11 +105,11 @@ int llOpenTx(LinkLayer llParameters)
         }
 
         // Verifica se o frame UA recebido está correto
-        if (UA[0] == 0x7E &&
-            UA[1] == 0x01 &&
-            UA[2] == 0x07 &&
-            UA[3] == (UA[1] ^ UA[2]) &&
-            UA[4] == 0x7E)
+        if if (UA[0] == FLAG &&
+                UA[1] == A_TX &&
+                UA[2] == C_UA &&
+                UA[3] == (A_TX ^ C_UA) &&
+                UA[4] == FLAG)
         {
             connected = TRUE;
             // O UA chegou, por isso já não precisamos do alarme
