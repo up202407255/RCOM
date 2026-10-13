@@ -105,11 +105,11 @@ int llOpenTx(LinkLayer llParameters)
         }
 
         // Verifica se o frame UA recebido está correto
-        if if (UA[0] == FLAG &&
-                UA[1] == A_TX &&
-                UA[2] == C_UA &&
-                UA[3] == (A_TX ^ C_UA) &&
-                UA[4] == FLAG)
+        if (UA[0] == FLAG &&
+            UA[1] == A_RX &&
+            UA[2] == C_UA &&
+            UA[3] == (A_RX ^ C_UA) &&
+            UA[4] == FLAG)
         {
             connected = TRUE;
             // O UA chegou, por isso já não precisamos do alarme
@@ -137,14 +137,6 @@ int llOpenTx(LinkLayer llParameters)
 
     printf("UA received correctly\n");
 
-    // Close serial port
-    if (closeSerialPort() < 0)
-    {
-        perror("closeSerialPort");
-        return -1;
-    }
-
-    printf("Serial port %s closed\n", llParameters.serialPort);
 
     return 0;
 }
@@ -200,9 +192,9 @@ int llOpenRx(LinkLayer llParameters)
 
     uaFrame[0] = FLAG;
 
-    uaFrame[1] = A_TX;
+    uaFrame[1] = A_RX;
     uaFrame[2] = C_UA;
-    uaFrame[3] = A_TX ^ C_UA;
+    uaFrame[3] = A_RX ^ C_UA;
 
     uaFrame[4] = FLAG;
 
