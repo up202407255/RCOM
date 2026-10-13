@@ -60,7 +60,7 @@ int llOpenTx(LinkLayer llParameters)
     SET[4] = 0x7E; // FLAG final
 
     // Cria espaço para guardar o frame UA recebido
-    unsigned char UA[5];
+    unsigned char UA[5]={0};
 
     int attempts = 0;
     int connected = FALSE;
