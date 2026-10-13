@@ -77,25 +77,36 @@ int llOpenTx(LinkLayer llParameters)
         alarmEnabled = TRUE;
         alarm(3);  
 
-        // Tenta receber o UA 
+        // Tenta receber o UA
+        int received = 0;
+
         for (int i = 0; i < 5; i++)
         {
             int bytesRead = readByteSerialPort(&UA[i]);
-            // Verifica se foi lido um byte
+
             if (bytesRead != 1)
             {
                 break;
             }
+
+            received++;
         }
 
-        printf("UA received: ");
-
-        for (int i = 0; i < 5; i++)
+        if (received == 5)
         {
-            printf("0x%02X ", UA[i]);
-        }
+            printf("UA received: ");
 
-        printf("\n");
+            for (int i = 0; i < 5; i++)
+            {
+                printf("0x%02X ", UA[i]);
+            }
+
+            printf("\n");
+        }
+        else
+        {
+            printf("No complete UA received\n");
+        }
 
         // Verifica se ocorreu timeout
         if (alarmEnabled == FALSE)
@@ -105,7 +116,8 @@ int llOpenTx(LinkLayer llParameters)
         }
 
         // Verifica se o frame UA recebido está correto
-        if (UA[0] == FLAG &&
+        if (received == 5 &&
+            UA[0] == FLAG &&
             UA[1] == A_RX &&
             UA[2] == C_UA &&
             UA[3] == (A_RX ^ C_UA) &&
