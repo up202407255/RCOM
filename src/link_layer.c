@@ -4,6 +4,7 @@
 
 #include "link_layer.h"
 #include "serial_port.h"
+#include "state_machine.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -150,7 +151,7 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Initialize state machine to receive SET
+    // Initialize state machine to receive a SET frame
     StateMachine sm;
     stateMachineInit(&sm, A_TX, C_SET);
 
@@ -178,7 +179,7 @@ int llOpenRx(LinkLayer llParameters)
 
         printf("Byte received: 0x%02X\n", byte);
 
-        // Process received byte using the state machine
+        // Let the state machine process the received byte
         stateMachineProcessByte(&sm, byte);
     }
 
@@ -189,9 +190,11 @@ int llOpenRx(LinkLayer llParameters)
     unsigned char uaFrame[5];
 
     uaFrame[0] = FLAG;
-    uaFrame[1] = A_RX;
+
+    uaFrame[1] = A_TX;
     uaFrame[2] = C_UA;
-    uaFrame[3] = A_RX ^ C_UA;
+    uaFrame[3] = A_TX ^ C_UA;
+
     uaFrame[4] = FLAG;
 
     // Send UA frame
