@@ -24,7 +24,21 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
 
     if (strcmp(role, "tx") == 0)
     {
-        llOpenTx(llParameters);
+        // Estabelece a ligação como emissor, enviando SET e aguardando UA.
+        // Se a abertura falhar, termina sem tentar fechar uma ligação inexistente.
+        if (llOpenTx(llParameters) < 0)
+        {
+            return;
+        }
+
+        // Fecha a porta série após o estabelecimento da ligação.
+        // NOTA: por enquanto, ainda não existe transferência do ficheiro.
+        if (llCloseTx() < 0)
+        {
+            return;
+        }
+
+        printf("Ligação TX fechada com sucesso.\n");
     }
     else if (strcmp(role, "rx") == 0)
     {

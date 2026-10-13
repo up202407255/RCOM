@@ -138,7 +138,7 @@ int llOpenTx(LinkLayer llParameters)
             alarmEnabled = FALSE;
             printf("UA received correctly\n");
         }
-        
+
     }    
 
     // Se não conseguiu receber um UA válido após 3 tentativas
@@ -249,7 +249,15 @@ int llReceive(unsigned char *packet)
 ////////////////////////////////////////////////
 int llCloseTx()
 {
-    // TODO: Implement this function
+    alarm(0); // Cancela qualquer alarme de timeout que ainda esteja ativo.
+    alarmEnabled = FALSE; // Indica que já não estamos à espera de receber uma resposta.
+
+    // Fecha a porta série e restaura as configurações originais.
+    if (closeSerialPort() < 0)
+    {
+        perror("closeSerialPort");
+        return -1;
+    }
 
     return 0;
 }
