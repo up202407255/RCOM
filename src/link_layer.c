@@ -152,7 +152,7 @@ int llOpenRx(LinkLayer llParameters)
 
     // Initialize state machine to receive SET
     StateMachine sm;
-    stateMachineInit(&sm, A, C_SET);
+    stateMachineInit(&sm, A_TX, C_SET);
 
     int nBytesBuf = 0;
 
@@ -189,9 +189,9 @@ int llOpenRx(LinkLayer llParameters)
     unsigned char uaFrame[5];
 
     uaFrame[0] = FLAG;
-    uaFrame[1] = A;
+    uaFrame[1] = A_RX;
     uaFrame[2] = C_UA;
-    uaFrame[3] = A ^ C_UA;
+    uaFrame[3] = A_RX ^ C_UA;
     uaFrame[4] = FLAG;
 
     // Send UA frame
