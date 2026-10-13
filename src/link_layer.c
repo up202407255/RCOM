@@ -20,6 +20,8 @@
 #define C_SET 0x03
 #define C_UA 0x07
 
+#define C_DISC 0x0B
+
 int alarmEnabled = FALSE;
 
 void alarmHandler(int signal)
@@ -264,7 +266,96 @@ int llCloseTx()
 
 int llCloseRx()
 {
-    // TODO: Implement this function
+    // 1. Receive DISC from transmitter byte by byte
+    StateMachine smDisc;
+    stateMachineInit(&smDisc, A_TX, C_DISC);
+
+    while (smDisc.state != STOP)
+    {
+        unsigned char byte;
+
+        int bytesRead = readByteSerialPort(&byte);
+
+        if (bytesRead < 0)
+        {
+            perror("readByteSerialPort");
+            return -1;
+        }
+
+        if (bytesRead == 0)
+        {
+            continue;
+        }
+
+        printf("Byte received: 0x%02X\n", byte);
+
+        // Validate each byte using the state machine
+        stateMachineProcessByte(&smDisc, byte);
+    }
+
+    printf("DISC received correctly\n");
+
+
+    // 2. Build DISC frame to send back to transmitter
+    unsigned char discFrame[5];
+
+    discFrame[0] = FLAG;
+    discFrame[1] = A_RX;
+    discFrame[2] = C_DISC;
+    discFrame[3] = A_RX ^ C_DISC;
+    discFrame[4] = FLAG;
+
+
+    // 3. Send DISC
+    int bytesWritten = writeBytesSerialPort(discFrame, 5);
+
+    if (bytesWritten < 0)
+    {
+        perror("writeBytesSerialPort");
+        return -1;
+    }
+
+    printf("DISC sent\n");
+
+
+    // 4. Receive final UA from transmitter byte by byte
+    StateMachine smUa;
+    stateMachineInit(&smUa, A_RX, C_UA);
+
+    while (smUa.state != STOP)
+    {
+        unsigned char byte;
+
+        int bytesRead = readByteSerialPort(&byte);
+
+        if (bytesRead < 0)
+        {
+            perror("readByteSerialPort");
+            return -1;
+        }
+
+        if (bytesRead == 0)
+        {
+            continue;
+        }
+
+        printf("Byte received: 0x%02X\n", byte);
+
+        // Again, validate byte by byte
+        stateMachineProcessByte(&smUa, byte);
+    }
+
+    printf("UA received correctly\n");
+
+
+    // 5. Close serial port
+    if (closeSerialPort() < 0)
+    {
+        perror("closeSerialPort");
+        return -1;
+    }
+
+    printf("Serial port closed\n");
 
     return 0;
 }
