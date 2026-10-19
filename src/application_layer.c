@@ -42,7 +42,17 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
     }
     else if (strcmp(role, "rx") == 0)
     {
-        llOpenRx(llParameters);
+        if (llOpenRx(llParameters) < 0)
+        {
+            return;
+        }
+
+        if (llCloseRx() < 0)
+        {
+            return;
+        }
+
+        printf("Ligação RX fechada com sucesso.\n");
     }
     else
     {

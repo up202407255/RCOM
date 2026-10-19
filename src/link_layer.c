@@ -251,8 +251,95 @@ int llReceive(unsigned char *packet)
 ////////////////////////////////////////////////
 int llCloseTx()
 {
-    alarm(0); // Cancela qualquer alarme de timeout que ainda esteja ativo.
-    alarmEnabled = FALSE; // Indica que já não estamos à espera de receber uma resposta.
+    // Trama DISC enviada pelo emissor.
+    unsigned char discFrame[5] = {
+        FLAG, A_TX, C_DISC, A_TX ^ C_DISC, FLAG
+    };
+
+    // Trama UA enviada pelo emissor no final do fecho.
+    unsigned char uaFrame[5] = {
+        FLAG, A_TX, C_UA, A_TX ^ C_UA, FLAG
+    };
+
+    // Tenta estabelecer o fecho da ligação até 3 vezes.
+    int attempts = 0;
+    int discReceived = FALSE;
+
+    while (attempts < 3 && !discReceived)
+    {
+        attempts++;
+
+        // Envia DISC ao recetor.
+        int bytesWritten = writeBytesSerialPort(discFrame, 5);
+        if (bytesWritten < 0)
+        {
+            perror("writeBytesSerialPort");
+            return -1;
+        }
+
+        printf("DISC sent (attempt %d)\n", attempts);
+
+        // Aguarda a resposta DISC do recetor.
+        StateMachine sm;
+        stateMachineInit(&sm, A_RX, C_DISC);
+
+        alarmEnabled = TRUE;
+        alarm(3);
+
+        while (alarmEnabled && sm.state != STOP)
+        {
+            unsigned char byte;
+            int bytesRead = readByteSerialPort(&byte);
+
+            if (bytesRead < 0)
+            {
+                // O alarme pode interromper a leitura.
+                if (!alarmEnabled)
+                    break;
+
+                perror("readByteSerialPort");
+                alarm(0);
+                alarmEnabled = FALSE;
+                return -1;
+            }
+
+            if (bytesRead == 0)
+                continue;
+
+            printf("Byte received: 0x%02X\n", byte);
+            stateMachineProcessByte(&sm, byte);
+        }
+
+        alarm(0);
+        alarmEnabled = FALSE;
+
+        if (sm.state == STOP)
+        {
+            discReceived = TRUE;
+            printf("DISC received correctly\n");
+        }
+        else
+        {
+            printf("Timeout waiting for DISC\n");
+        }
+    }
+
+    // Se não recebemos DISC, não podemos concluir o fecho.
+    if (!discReceived)
+    {
+        fprintf(stderr, "Failed to close connection: DISC not received\n");
+        return -1;
+    }
+
+    // Envia UA para confirmar o fecho da ligação.
+    int bytesWritten = writeBytesSerialPort(uaFrame, 5);
+    if (bytesWritten < 0)
+    {
+        perror("writeBytesSerialPort");
+        return -1;
+    }
+
+    printf("UA sent\n");
 
     // Fecha a porta série e restaura as configurações originais.
     if (closeSerialPort() < 0)
@@ -261,6 +348,7 @@ int llCloseTx()
         return -1;
     }
 
+    printf("Serial port closed\n");
     return 0;
 }
 
@@ -320,7 +408,7 @@ int llCloseRx()
 
     // 4. Receive final UA from transmitter byte by byte
     StateMachine smUa;
-    stateMachineInit(&smUa, A_RX, C_UA);
+    stateMachineInit(&smUa, A_TX, C_UA);
 
     while (smUa.state != STOP)
     {
