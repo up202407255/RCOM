@@ -241,7 +241,118 @@ int llSend(const unsigned char *buf, int bufSize)
 ////////////////////////////////////////////////
 int llReceive(unsigned char *packet)
 {
-    // TODO: Implement this function
+    unsigned char byte;
+
+    unsigned char control = 0;
+    unsigned char stuffedData[2 * BUF_SIZE + 2];
+    int stuffedSize = 0;
+
+    int state = 0;
+
+     while (1)
+    {
+        int bytesRead = readByteSerialPort(&byte);
+
+        if (bytesRead < 0)
+        {
+            perror("readByteSerialPort");
+            return -1;
+        }
+
+        if (bytesRead == 0)
+        {
+            continue;
+        }
+
+        printf("Byte received: 0x%02X\n", byte);
+
+        switch (state)
+        {
+            // Waiting for initial FLAG
+            case 0:
+                if (byte == FLAG)
+                {
+                    state = 1;
+                }
+                break;
+
+            // Waiting for address
+            case 1:
+                if (byte == FLAG)
+                {
+                    // Multiple FLAGs are allowed
+                    state = 1;
+                }
+                else if (byte == A_TX)
+                {
+                    state = 2;
+                }
+                else
+                {
+                    state = 0;
+                }
+                break;
+
+            // Waiting for control field
+            case 2:
+                if (byte == C_I0 || byte == C_I1)
+                {
+                    control = byte;
+                    state = 3;
+                }
+                else if (byte == FLAG)
+                {
+                    state = 1;
+                }
+                else
+                {
+                    state = 0;
+                }
+                break;
+
+            // Validate BCC1
+            case 3:
+                if (byte == (A_TX ^ control))
+                {
+                    stuffedSize = 0;
+                    state = 4;
+                }
+                else if (byte == FLAG)
+                {
+                    state = 1;
+                }
+                else
+                {
+                    // Wrong BCC1 -> ignore frame
+                    state = 0;
+                }
+                break;
+
+            // Receive DATA + BCC2 until final FLAG
+            case 4:
+                if (byte == FLAG)
+                {
+                    state = 5;
+                }
+                else
+                {
+                    if (stuffedSize >= 2 * BUF_SIZE + 2)
+                    {
+                        printf("Frame too large\n");
+                        return -1;
+                    }
+
+                    stuffedData[stuffedSize++] = byte;
+                }
+                break;
+        }
+
+        if (state == 5)
+        {
+            break;
+        }
+    }
+    printf("I frame received\n");
 
     return 0;
 }
