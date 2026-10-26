@@ -22,7 +22,26 @@
 
 #define C_DISC 0x0B
 
+#define C_I0 0x00
+#define C_I1 0x80
+
+#define C_RR0 0xAA
+#define C_RR1 0xAB
+
+#define C_REJ0 0x54
+#define C_REJ1 0x55
+
+#define ESCAPE 0x7D
+#define ESC_FLAG 0x5E
+#define ESC_ESCAPE 0x5D
+
 int alarmEnabled = FALSE;
+
+static int txSequenceNumber = 0;
+static int expectedNs = 0;
+
+static int protocolTimeout = 3;
+static int protocolRetransmissions = 3;
 
 void alarmHandler(int signal)
 {
@@ -35,6 +54,10 @@ void alarmHandler(int signal)
 ////////////////////////////////////////////////
 int llOpenTx(LinkLayer llParameters)
 {
+    protocolTimeout = llParameters.timeout;
+    protocolRetransmissions = llParameters.nRetransmissions;
+    txSequenceNumber = 0;
+
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -66,7 +89,7 @@ int llOpenTx(LinkLayer llParameters)
     int connected = FALSE;
     int state;
 
-    while (attempts < 3  && connected == FALSE)
+    while (attempts < protocolRetransmissions && connected == FALSE)
     {
         attempts++;
 
@@ -76,7 +99,7 @@ int llOpenTx(LinkLayer llParameters)
     
         // Ativa o alarme durante 3 segundos
         alarmEnabled = TRUE;
-        alarm(3);  
+        alarm(protocolTimeout);  
 
         // Tenta receber o UA
 
@@ -100,7 +123,7 @@ int llOpenTx(LinkLayer llParameters)
                     break;
 
                 case 1:
-                    if (byte == A_RX)
+                    if (byte == A_TX)
                         state = 2;
                     else if (byte != FLAG)
                         state = 0;
@@ -116,7 +139,7 @@ int llOpenTx(LinkLayer llParameters)
                     break;
 
                 case 3:
-                    if (byte == (A_RX ^ C_UA))
+                    if (byte == (A_TX ^ C_UA))
                         state = 4;
                     else if (byte == FLAG)
                         state = 1;
@@ -156,6 +179,10 @@ int llOpenTx(LinkLayer llParameters)
 
 int llOpenRx(LinkLayer llParameters)
 {
+    protocolTimeout = llParameters.timeout;
+    protocolRetransmissions = llParameters.nRetransmissions;
+    expectedNs = 0;
+
     // Open serial port
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
@@ -205,9 +232,9 @@ int llOpenRx(LinkLayer llParameters)
 
     uaFrame[0] = FLAG;
 
-    uaFrame[1] = A_RX;
+    uaFrame[1] = A_TX;
     uaFrame[2] = C_UA;
-    uaFrame[3] = A_RX ^ C_UA;
+    uaFrame[3] = A_TX ^ C_UA;
 
     uaFrame[4] = FLAG;
 
@@ -231,9 +258,212 @@ int llOpenRx(LinkLayer llParameters)
 ////////////////////////////////////////////////
 int llSend(const unsigned char *buf, int bufSize)
 {
-    // TODO: Implement this function
+    // Calculate BCC2 over the packet received from the Application Layer
+    unsigned char bcc2 = 0x00;
 
-    return 0;
+    for (int i = 0; i < bufSize; i++)
+    {
+        bcc2 ^= buf[i];
+    }
+
+    // Choose I0 or I1 according to the current sequence number
+    unsigned char control;
+
+    if (txSequenceNumber == 0)
+        control = C_I0;
+    else
+        control = C_I1;
+
+    // Worst case: every data byte and BCC2 need stuffing
+    unsigned char frame[2 * bufSize + 7];
+    int frameSize = 0;
+
+    // I frame header
+    frame[frameSize++] = FLAG;
+    frame[frameSize++] = A_TX;
+    frame[frameSize++] = control;
+    frame[frameSize++] = A_TX ^ control;
+
+    // Byte stuffing of the packet
+    for (int i = 0; i < bufSize; i++)
+    {
+        if (buf[i] == FLAG)
+        {
+            frame[frameSize++] = ESCAPE;
+            frame[frameSize++] = ESC_FLAG;
+        }
+        else if (buf[i] == ESCAPE)
+        {
+            frame[frameSize++] = ESCAPE;
+            frame[frameSize++] = ESC_ESCAPE;
+        }
+        else
+        {
+            frame[frameSize++] = buf[i];
+        }
+    }
+
+    // BCC2 must also be stuffed if necessary
+    if (bcc2 == FLAG)
+    {
+        frame[frameSize++] = ESCAPE;
+        frame[frameSize++] = ESC_FLAG;
+    }
+    else if (bcc2 == ESCAPE)
+    {
+        frame[frameSize++] = ESCAPE;
+        frame[frameSize++] = ESC_ESCAPE;
+    }
+    else
+    {
+        frame[frameSize++] = bcc2;
+    }
+
+    frame[frameSize++] = FLAG;
+
+    unsigned char expectedRR =
+        (txSequenceNumber == 0) ? C_RR1 : C_RR0;
+
+    unsigned char expectedREJ =
+        (txSequenceNumber == 0) ? C_REJ0 : C_REJ1;
+
+    int attempts = 0;
+
+    while (attempts < protocolRetransmissions)
+    {
+        attempts++;
+
+        int bytesWritten =
+            writeBytesSerialPort(frame, frameSize);
+
+        if (bytesWritten < 0)
+        {
+            perror("writeBytesSerialPort");
+            return -1;
+        }
+
+        printf("I frame sent (Ns=%d, attempt %d)\n",
+               txSequenceNumber, attempts);
+
+        alarmEnabled = TRUE;
+        alarm(protocolTimeout);
+
+        int state = 0;
+        unsigned char responseControl = 0;
+
+        // Receive RR or REJ byte by byte
+        while (alarmEnabled && state != 5)
+        {
+            unsigned char byte;
+
+            int bytesRead =
+                readByteSerialPort(&byte);
+
+            if (bytesRead < 0)
+            {
+                // read may be interrupted by SIGALRM
+                if (!alarmEnabled)
+                    break;
+
+                perror("readByteSerialPort");
+                alarm(0);
+                alarmEnabled = FALSE;
+                return -1;
+            }
+
+            if (bytesRead == 0)
+                continue;
+
+            printf("Byte received: 0x%02X\n", byte);
+
+            switch (state)
+            {
+                case 0:
+                    if (byte == FLAG)
+                        state = 1;
+                    break;
+
+                case 1:
+                    if (byte == A_TX)
+                        state = 2;
+                    else if (byte != FLAG)
+                        state = 0;
+                    break;
+
+                case 2:
+                    if (byte == expectedRR ||
+                        byte == expectedREJ)
+                    {
+                        responseControl = byte;
+                        state = 3;
+                    }
+                    else if (byte == FLAG)
+                    {
+                        state = 1;
+                    }
+                    else
+                    {
+                        state = 0;
+                    }
+
+                    break;
+
+                case 3:
+                    if (byte ==
+                        (A_TX ^ responseControl))
+                    {
+                        state = 4;
+                    }
+                    else if (byte == FLAG)
+                    {
+                        state = 1;
+                    }
+                    else
+                    {
+                        state = 0;
+                    }
+
+                    break;
+
+                case 4:
+                    if (byte == FLAG)
+                        state = 5;
+                    else
+                        state = 0;
+
+                    break;
+            }
+        }
+
+        alarm(0);
+        alarmEnabled = FALSE;
+
+        if (state == 5)
+        {
+            if (responseControl == expectedRR)
+            {
+                printf("RR received correctly\n");
+
+                // Next I frame will use the other sequence number
+                txSequenceNumber =
+                    1 - txSequenceNumber;
+
+                return bufSize;
+            }
+
+            if (responseControl == expectedREJ)
+            {
+                printf("REJ received. Retransmitting...\n");
+                continue;
+            }
+        }
+
+        printf("No valid acknowledgement received\n");
+    }
+
+    printf("Failed to send I frame\n");
+
+    return -1;
 }
 
 ////////////////////////////////////////////////
@@ -241,120 +471,327 @@ int llSend(const unsigned char *buf, int bufSize)
 ////////////////////////////////////////////////
 int llReceive(unsigned char *packet)
 {
-    unsigned char byte;
-
-    unsigned char control = 0;
-    unsigned char stuffedData[2 * BUF_SIZE + 2];
-    int stuffedSize = 0;
-
-    int state = 0;
-
-     while (1)
+    while (1)
     {
-        int bytesRead = readByteSerialPort(&byte);
+        unsigned char byte;
+        unsigned char control = 0;
 
-        if (bytesRead < 0)
+        unsigned char stuffedData[2 * BUF_SIZE + 2];
+        int stuffedSize = 0;
+
+        int state = 0;
+
+        // Receive one complete I frame
+        while (state != 5)
         {
-            perror("readByteSerialPort");
-            return -1;
+            int bytesRead =
+                readByteSerialPort(&byte);
+
+            if (bytesRead < 0)
+            {
+                perror("readByteSerialPort");
+                return -1;
+            }
+
+            if (bytesRead == 0)
+                continue;
+
+            printf("Byte received: 0x%02X\n", byte);
+
+            switch (state)
+            {
+                // Waiting for initial FLAG
+                case 0:
+                    if (byte == FLAG)
+                        state = 1;
+
+                    break;
+
+                // Waiting for address
+                case 1:
+                    if (byte == FLAG)
+                    {
+                        // Multiple FLAGs are allowed
+                        state = 1;
+                    }
+                    else if (byte == A_TX)
+                    {
+                        state = 2;
+                    }
+                    else
+                    {
+                        state = 0;
+                    }
+
+                    break;
+
+                // Waiting for I0 or I1
+                case 2:
+                    if (byte == C_I0 ||
+                        byte == C_I1)
+                    {
+                        control = byte;
+                        state = 3;
+                    }
+                    else if (byte == FLAG)
+                    {
+                        state = 1;
+                    }
+                    else
+                    {
+                        state = 0;
+                    }
+
+                    break;
+
+                // Validate BCC1
+                case 3:
+                    if (byte == (A_TX ^ control))
+                    {
+                        stuffedSize = 0;
+                        state = 4;
+                    }
+                    else if (byte == FLAG)
+                    {
+                        state = 1;
+                    }
+                    else
+                    {
+                        // Wrong BCC1:
+                        // specification says to ignore the frame
+                        state = 0;
+                    }
+
+                    break;
+
+                // Receive DATA + BCC2
+                case 4:
+                    if (byte == FLAG)
+                    {
+                        state = 5;
+                    }
+                    else
+                    {
+                        if (stuffedSize >=
+                            2 * BUF_SIZE + 2)
+                        {
+                            printf("Frame too large\n");
+                            return -1;
+                        }
+
+                        stuffedData[stuffedSize++] =
+                            byte;
+                    }
+
+                    break;
+            }
         }
 
-        if (bytesRead == 0)
+        int receivedNs =
+            (control == C_I0) ? 0 : 1;
+
+        int isNewFrame =
+            (receivedNs == expectedNs);
+
+        // Destuff DATA + BCC2
+        unsigned char data[BUF_SIZE + 1];
+        int dataSize = 0;
+        int destuffError = FALSE;
+
+        for (int i = 0; i < stuffedSize; i++)
         {
+            if (stuffedData[i] == ESCAPE)
+            {
+                if (i + 1 >= stuffedSize)
+                {
+                    destuffError = TRUE;
+                    break;
+                }
+
+                i++;
+
+                if (stuffedData[i] == ESC_FLAG)
+                {
+                    data[dataSize++] = FLAG;
+                }
+                else if (stuffedData[i] ==
+                         ESC_ESCAPE)
+                {
+                    data[dataSize++] = ESCAPE;
+                }
+                else
+                {
+                    destuffError = TRUE;
+                    break;
+                }
+            }
+            else
+            {
+                data[dataSize++] =
+                    stuffedData[i];
+            }
+
+            if (dataSize > BUF_SIZE)
+            {
+                printf("Frame too large after destuffing\n");
+                return -1;
+            }
+        }
+
+        // Invalid data field
+        if (destuffError || dataSize < 1)
+        {
+            unsigned char responseControl;
+
+            if (isNewFrame)
+            {
+                responseControl =
+                    (expectedNs == 0)
+                        ? C_REJ0
+                        : C_REJ1;
+            }
+            else
+            {
+                responseControl =
+                    (expectedNs == 0)
+                        ? C_RR0
+                        : C_RR1;
+            }
+
+            unsigned char response[5] = {
+                FLAG,
+                A_TX,
+                responseControl,
+                A_TX ^ responseControl,
+                FLAG
+            };
+
+            if (writeBytesSerialPort(response, 5) < 0)
+            {
+                perror("writeBytesSerialPort");
+                return -1;
+            }
+
             continue;
         }
 
-        printf("Byte received: 0x%02X\n", byte);
+        // Last byte after destuffing is BCC2
+        unsigned char receivedBCC2 =
+            data[dataSize - 1];
 
-        switch (state)
+        int packetSize =
+            dataSize - 1;
+
+        // Calculate BCC2 over packet
+        unsigned char calculatedBCC2 = 0x00;
+
+        for (int i = 0; i < packetSize; i++)
         {
-            // Waiting for initial FLAG
-            case 0:
-                if (byte == FLAG)
-                {
-                    state = 1;
-                }
-                break;
-
-            // Waiting for address
-            case 1:
-                if (byte == FLAG)
-                {
-                    // Multiple FLAGs are allowed
-                    state = 1;
-                }
-                else if (byte == A_TX)
-                {
-                    state = 2;
-                }
-                else
-                {
-                    state = 0;
-                }
-                break;
-
-            // Waiting for control field
-            case 2:
-                if (byte == C_I0 || byte == C_I1)
-                {
-                    control = byte;
-                    state = 3;
-                }
-                else if (byte == FLAG)
-                {
-                    state = 1;
-                }
-                else
-                {
-                    state = 0;
-                }
-                break;
-
-            // Validate BCC1
-            case 3:
-                if (byte == (A_TX ^ control))
-                {
-                    stuffedSize = 0;
-                    state = 4;
-                }
-                else if (byte == FLAG)
-                {
-                    state = 1;
-                }
-                else
-                {
-                    // Wrong BCC1 -> ignore frame
-                    state = 0;
-                }
-                break;
-
-            // Receive DATA + BCC2 until final FLAG
-            case 4:
-                if (byte == FLAG)
-                {
-                    state = 5;
-                }
-                else
-                {
-                    if (stuffedSize >= 2 * BUF_SIZE + 2)
-                    {
-                        printf("Frame too large\n");
-                        return -1;
-                    }
-
-                    stuffedData[stuffedSize++] = byte;
-                }
-                break;
+            calculatedBCC2 ^= data[i];
         }
 
-        if (state == 5)
+        // BCC2 error
+        if (calculatedBCC2 != receivedBCC2)
         {
-            break;
+            unsigned char responseControl;
+
+            if (isNewFrame)
+            {
+                // Ask retransmission of the expected frame
+                responseControl =
+                    (expectedNs == 0)
+                        ? C_REJ0
+                        : C_REJ1;
+
+                printf("BCC2 error. Sending REJ%d\n",
+                       expectedNs);
+            }
+            else
+            {
+                // Duplicate frame: send RR again
+                responseControl =
+                    (expectedNs == 0)
+                        ? C_RR0
+                        : C_RR1;
+            }
+
+            unsigned char response[5] = {
+                FLAG,
+                A_TX,
+                responseControl,
+                A_TX ^ responseControl,
+                FLAG
+            };
+
+            if (writeBytesSerialPort(response, 5) < 0)
+            {
+                perror("writeBytesSerialPort");
+                return -1;
+            }
+
+            continue;
         }
+
+        // Duplicate frame
+        if (!isNewFrame)
+        {
+            unsigned char rrControl =
+                (expectedNs == 0)
+                    ? C_RR0
+                    : C_RR1;
+
+            unsigned char rrFrame[5] = {
+                FLAG,
+                A_TX,
+                rrControl,
+                A_TX ^ rrControl,
+                FLAG
+            };
+
+            if (writeBytesSerialPort(rrFrame, 5) < 0)
+            {
+                perror("writeBytesSerialPort");
+                return -1;
+            }
+
+            printf("Duplicate I frame discarded\n");
+
+            continue;
+        }
+
+        // New and valid frame: copy packet
+        for (int i = 0; i < packetSize; i++)
+        {
+            packet[i] = data[i];
+        }
+
+        // We now expect the other sequence number
+        expectedNs = 1 - expectedNs;
+
+        unsigned char rrControl =
+            (expectedNs == 0)
+                ? C_RR0
+                : C_RR1;
+
+        unsigned char rrFrame[5] = {
+            FLAG,
+            A_TX,
+            rrControl,
+            A_TX ^ rrControl,
+            FLAG
+        };
+
+        if (writeBytesSerialPort(rrFrame, 5) < 0)
+        {
+            perror("writeBytesSerialPort");
+            return -1;
+        }
+
+        printf("I frame received correctly\n");
+        printf("RR%d sent\n", expectedNs);
+
+        return packetSize;
     }
-    printf("I frame received\n");
-
-    return 0;
 }
 
 ////////////////////////////////////////////////
@@ -369,7 +806,7 @@ int llCloseTx()
 
     // Trama UA enviada pelo emissor no final do fecho.
     unsigned char uaFrame[5] = {
-        FLAG, A_TX, C_UA, A_TX ^ C_UA, FLAG
+        FLAG, A_RX, C_UA, A_RX ^ C_UA, FLAG
     };
 
     // Tenta estabelecer o fecho da ligação até 3 vezes.
@@ -519,7 +956,7 @@ int llCloseRx()
 
     // 4. Receive final UA from transmitter byte by byte
     StateMachine smUa;
-    stateMachineInit(&smUa, A_TX, C_UA);
+    stateMachineInit(&smUa, A_RX, C_UA);
 
     while (smUa.state != STOP)
     {
