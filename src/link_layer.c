@@ -8,7 +8,7 @@
 
 #include <stdio.h>
 #include <unistd.h>
-#include <signal.h> 
+#include <signal.h>
 
 // MISC
 #define _POSIX_SOURCE 1 // POSIX compliant source
@@ -54,6 +54,7 @@ void alarmHandler(int signal)
 ////////////////////////////////////////////////
 int llOpenTx(LinkLayer llParameters)
 {
+    // Save the connection parameters.
     protocolTimeout = llParameters.timeout;
     protocolRetransmissions = llParameters.nRetransmissions;
     txSequenceNumber = 0;
@@ -66,7 +67,7 @@ int llOpenTx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Configura o alarme
+    // Set the alarm handler.
     struct sigaction act = {0};
     act.sa_handler = &alarmHandler;
 
@@ -76,32 +77,32 @@ int llOpenTx(LinkLayer llParameters)
         return -1;
     }
 
-    // Cria o frame SET com 5 bytes
+    // Build the 5-byte SET frame.
     unsigned char SET[5];
 
-    SET[0] = 0x7E; // FLAG inicial
-    SET[1] = 0x03; // Endereço do emissor
-    SET[2] = 0x03; // Campo de controlo: SET
-    SET[3] = SET[1] ^ SET[2]; // BCC1: XOR entre A e C
-    SET[4] = 0x7E; // FLAG final
+    SET[0] = 0x7E; // Start flag
+    SET[1] = 0x03; // Transmitter address
+    SET[2] = 0x03; // Control field: SET
+    SET[3] = SET[1] ^ SET[2]; // BCC1: XOR of A and C
+    SET[4] = 0x7E; // End flag
 
     int attempts = 0;
     int connected = FALSE;
     int state;
 
+    // Send SET and wait for UA, retrying on timeout.
     while (attempts < protocolRetransmissions && connected == FALSE)
     {
         attempts++;
 
-        // Envia o frame SET para o recetor
+        // Send the SET frame to the receiver.
         writeBytesSerialPort(SET, 5);
 
-        // Ativa o alarme durante 3 segundos
+        // Start the timeout alarm.
         alarmEnabled = TRUE;
         alarm(protocolTimeout);
 
-        // Tenta receber o UA
-
+        // Wait for UA.
         state = 0;
 
         while (alarmEnabled && state != 5)
@@ -163,7 +164,7 @@ int llOpenTx(LinkLayer llParameters)
 
     }
 
-    // Se não conseguiu receber um UA válido após 3 tentativas
+    // Check if UA was received after all attempts.
     if (connected == FALSE)
     {
         printf("Failed to receive UA after 3 attempts\n");
@@ -180,7 +181,7 @@ int llOpenRx(LinkLayer llParameters)
     protocolRetransmissions = llParameters.nRetransmissions;
     expectedNs = 0;
 
-    // Open serial port
+    // Open serial port.
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -189,13 +190,13 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Initialize state machine to receive a SET frame
+    // Wait for the transmitter to start the connection.
     StateMachine sm;
     stateMachineInit(&sm, A_TX, C_SET);
 
     int nBytesBuf = 0;
 
-    // Wait until a valid SET frame is received
+    // Wait until a valid SET frame is received.
     while (sm.state != STOP)
     {
         unsigned char byte;
@@ -215,13 +216,13 @@ int llOpenRx(LinkLayer llParameters)
 
         nBytesBuf += bytes;
 
-        // Let the state machine process the received byte
+        // Let the state machine process the received byte.
         stateMachineProcessByte(&sm, byte);
     }
 
     printf("SET received correctly\n");
 
-    // Build UA frame
+    // Build the UA frame.
     unsigned char uaFrame[5];
 
     uaFrame[0] = FLAG;
@@ -232,7 +233,7 @@ int llOpenRx(LinkLayer llParameters)
 
     uaFrame[4] = FLAG;
 
-    // Send UA frame
+    // Confirm the connection by sending UA.
     int bytesWritten = writeBytesSerialPort(uaFrame, 5);
 
     if (bytesWritten < 0)
@@ -251,7 +252,7 @@ int llOpenRx(LinkLayer llParameters)
 ////////////////////////////////////////////////
 int llSend(const unsigned char *buf, int bufSize)
 {
-    // Calculate BCC2 over the packet received from the Application Layer
+    // Calculate the XOR of all packet bytes.
     unsigned char bcc2 = 0x00;
 
     for (int i = 0; i < bufSize; i++)
@@ -259,7 +260,7 @@ int llSend(const unsigned char *buf, int bufSize)
         bcc2 ^= buf[i];
     }
 
-    // Choose I0 or I1 according to the current sequence number
+    // Choose I0 or I1 according to the current sequence number.
     unsigned char control;
 
     if (txSequenceNumber == 0)
@@ -267,17 +268,17 @@ int llSend(const unsigned char *buf, int bufSize)
     else
         control = C_I1;
 
-    // Worst case: every data byte and BCC2 need stuffing
+    // Worst case: every data byte and BCC2 need stuffing.
     unsigned char frame[2 * bufSize + 7];
     int frameSize = 0;
 
-    // I frame header
+    // I frame header.
     frame[frameSize++] = FLAG;
     frame[frameSize++] = A_TX;
     frame[frameSize++] = control;
     frame[frameSize++] = A_TX ^ control;
 
-    // Byte stuffing of the packet
+    // Escape special bytes so they are not confused with FLAG.
     for (int i = 0; i < bufSize; i++)
     {
         if (buf[i] == FLAG)
@@ -296,7 +297,7 @@ int llSend(const unsigned char *buf, int bufSize)
         }
     }
 
-    // BCC2 must also be stuffed if necessary
+    // BCC2 must also be stuffed if necessary.
     if (bcc2 == FLAG)
     {
         frame[frameSize++] = ESCAPE;
@@ -322,6 +323,7 @@ int llSend(const unsigned char *buf, int bufSize)
 
     int attempts = 0;
 
+    // Wait for acknowledgement and retry if needed.
     while (attempts < protocolRetransmissions)
     {
         attempts++;
@@ -341,7 +343,7 @@ int llSend(const unsigned char *buf, int bufSize)
         int state = 0;
         unsigned char responseControl = 0;
 
-        // Receive RR or REJ byte by byte
+        // Receive RR or REJ byte by byte.
         while (alarmEnabled && state != 5)
         {
             unsigned char byte;
@@ -351,7 +353,7 @@ int llSend(const unsigned char *buf, int bufSize)
 
             if (bytesRead < 0)
             {
-                // read may be interrupted by SIGALRM
+                // read may be interrupted by SIGALRM.
                 if (!alarmEnabled)
                     break;
 
@@ -430,7 +432,7 @@ int llSend(const unsigned char *buf, int bufSize)
         {
             if (responseControl == expectedRR)
             {
-                // Next I frame will use the other sequence number
+                // Next I frame will use the other sequence number.
                 txSequenceNumber =
                     1 - txSequenceNumber;
 
@@ -467,7 +469,7 @@ int llReceive(unsigned char *packet)
 
         int state = 0;
 
-        // Receive one complete I frame
+        // Receive one complete I frame.
         while (state != 5)
         {
             int bytesRead =
@@ -484,18 +486,18 @@ int llReceive(unsigned char *packet)
 
             switch (state)
             {
-                // Waiting for initial FLAG
+                // Waiting for initial FLAG.
                 case 0:
                     if (byte == FLAG)
                         state = 1;
 
                     break;
 
-                // Waiting for address
+                // Waiting for address.
                 case 1:
                     if (byte == FLAG)
                     {
-                        // Multiple FLAGs are allowed
+                        // Multiple FLAGs are allowed.
                         state = 1;
                     }
                     else if (byte == A_TX)
@@ -509,7 +511,7 @@ int llReceive(unsigned char *packet)
 
                     break;
 
-                // Waiting for I0 or I1
+                // Waiting for I0 or I1.
                 case 2:
                     if (byte == C_I0 ||
                         byte == C_I1)
@@ -528,7 +530,7 @@ int llReceive(unsigned char *packet)
 
                     break;
 
-                // Validate BCC1
+                // Validate BCC1.
                 case 3:
                     if (byte == (A_TX ^ control))
                     {
@@ -541,14 +543,13 @@ int llReceive(unsigned char *packet)
                     }
                     else
                     {
-                        // Wrong BCC1:
-                        // specification says to ignore the frame
+                        // Wrong BCC1: ignore the frame.
                         state = 0;
                     }
 
                     break;
 
-                // Receive DATA + BCC2
+                // Receive DATA + BCC2.
                 case 4:
                     if (byte == FLAG)
                     {
@@ -577,7 +578,7 @@ int llReceive(unsigned char *packet)
         int isNewFrame =
             (receivedNs == expectedNs);
 
-        // Destuff DATA + BCC2
+        // Restore the original data bytes.
         unsigned char data[BUF_SIZE + 1];
         int dataSize = 0;
         int destuffError = FALSE;
@@ -598,8 +599,7 @@ int llReceive(unsigned char *packet)
                 {
                     data[dataSize++] = FLAG;
                 }
-                else if (stuffedData[i] ==
-                         ESC_ESCAPE)
+                else if (stuffedData[i] == ESC_ESCAPE)
                 {
                     data[dataSize++] = ESCAPE;
                 }
@@ -622,7 +622,7 @@ int llReceive(unsigned char *packet)
             }
         }
 
-        // Invalid data field
+        // Invalid data field.
         if (destuffError || dataSize < 1)
         {
             unsigned char responseControl;
@@ -659,14 +659,14 @@ int llReceive(unsigned char *packet)
             continue;
         }
 
-        // Last byte after destuffing is BCC2
+        // The last byte after destuffing is BCC2.
         unsigned char receivedBCC2 =
             data[dataSize - 1];
 
         int packetSize =
             dataSize - 1;
 
-        // Calculate BCC2 over packet
+        // Check if the received packet is correct.
         unsigned char calculatedBCC2 = 0x00;
 
         for (int i = 0; i < packetSize; i++)
@@ -674,13 +674,13 @@ int llReceive(unsigned char *packet)
             calculatedBCC2 ^= data[i];
         }
 
-        // BCC2 error
+        // Handle a BCC2 error.
         if (calculatedBCC2 != receivedBCC2)
         {
             unsigned char responseControl;
             if (isNewFrame)
             {
-                // Ask retransmission of the expected frame
+                // Ask for retransmission of the expected frame.
                 responseControl =
                     (expectedNs == 0)
                         ? C_REJ0
@@ -691,7 +691,7 @@ int llReceive(unsigned char *packet)
             }
             else
             {
-                // Duplicate frame: send RR again
+                // Duplicate frame: send RR again.
                 responseControl =
                     (expectedNs == 0)
                         ? C_RR0
@@ -715,7 +715,7 @@ int llReceive(unsigned char *packet)
             continue;
         }
 
-        // Duplicate frame
+        // Discard duplicate frames and acknowledge them again.
         if (!isNewFrame)
         {
             unsigned char rrControl =
@@ -742,13 +742,13 @@ int llReceive(unsigned char *packet)
             continue;
         }
 
-        // New and valid frame: copy packet
+        // Copy the valid packet to the Application Layer.
         for (int i = 0; i < packetSize; i++)
         {
             packet[i] = data[i];
         }
 
-        // We now expect the other sequence number
+        // Expect the other sequence number next.
         expectedNs = 1 - expectedNs;
 
         unsigned char rrControl =
@@ -769,7 +769,7 @@ int llReceive(unsigned char *packet)
             perror("writeBytesSerialPort");
             return -1;
         }
-        
+
         return packetSize;
     }
 }
@@ -779,17 +779,17 @@ int llReceive(unsigned char *packet)
 ////////////////////////////////////////////////
 int llCloseTx()
 {
-    // Trama DISC enviada pelo emissor.
+    // Start the connection closing procedure.
     unsigned char discFrame[5] = {
         FLAG, A_TX, C_DISC, A_TX ^ C_DISC, FLAG
     };
 
-    // Trama UA enviada pelo emissor no final do fecho.
+    // UA frame sent by the transmitter to finish closing.
     unsigned char uaFrame[5] = {
         FLAG, A_RX, C_UA, A_RX ^ C_UA, FLAG
     };
 
-    // Tenta estabelecer o fecho da ligação até 3 vezes.
+    // Try to close the connection up to 3 times.
     int attempts = 0;
     int discReceived = FALSE;
 
@@ -797,7 +797,7 @@ int llCloseTx()
     {
         attempts++;
 
-        // Envia DISC ao recetor.
+        // Send DISC to the receiver.
         int bytesWritten = writeBytesSerialPort(discFrame, 5);
         if (bytesWritten < 0)
         {
@@ -807,7 +807,7 @@ int llCloseTx()
 
         printf("DISC sent (attempt %d)\n", attempts);
 
-        // Aguarda a resposta DISC do recetor.
+        // Wait for the receiver's DISC response.
         StateMachine sm;
         stateMachineInit(&sm, A_RX, C_DISC);
 
@@ -821,7 +821,7 @@ int llCloseTx()
 
             if (bytesRead < 0)
             {
-                // O alarme pode interromper a leitura.
+                // The alarm may interrupt the read operation.
                 if (!alarmEnabled)
                     break;
 
@@ -851,14 +851,14 @@ int llCloseTx()
         }
     }
 
-    // Se não recebemos DISC, não podemos concluir o fecho.
+    // If DISC is not received, the connection cannot be closed.
     if (!discReceived)
     {
         fprintf(stderr, "Failed to close connection: DISC not received\n");
         return -1;
     }
 
-    // Envia UA para confirmar o fecho da ligação.
+    // Send UA to confirm that the connection is closing.
     int bytesWritten = writeBytesSerialPort(uaFrame, 5);
     if (bytesWritten < 0)
     {
@@ -868,7 +868,7 @@ int llCloseTx()
 
     printf("UA sent\n");
 
-    // Fecha a porta série e restaura as configurações originais.
+    // Close the serial port and restore the original settings.
     if (closeSerialPort() < 0)
     {
         perror("closeSerialPort");
@@ -881,6 +881,7 @@ int llCloseTx()
 
 int llCloseRx()
 {
+    // Wait for the transmitter to start closing the connection.
     // 1. Receive DISC from transmitter byte by byte
     StateMachine smDisc;
     stateMachineInit(&smDisc, A_TX, C_DISC);
@@ -902,7 +903,7 @@ int llCloseRx()
             continue;
         }
 
-        // Validate each byte using the state machine
+        // Validate each byte using the state machine.
         stateMachineProcessByte(&smDisc, byte);
     }
 
@@ -949,7 +950,7 @@ int llCloseRx()
             continue;
         }
 
-        // Again, validate byte by byte
+        // Validate each byte using the state machine.
         stateMachineProcessByte(&smUa, byte);
     }
 

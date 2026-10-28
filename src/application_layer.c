@@ -17,8 +17,7 @@
 #define T_FILE_SIZE 0x00
 #define T_FILE_NAME 0x01
 
-// Our current Link Layer accepts application packets up to 255 bytes.
-// DATA packets use 3 bytes for C, L2 and L1.
+// Maximum application packet size and file chunk size
 #define APP_PACKET_MAX 255
 #define FILE_CHUNK_SIZE 252
 
@@ -27,7 +26,7 @@
 // AUXILIARY FUNCTIONS
 ////////////////////////////////////////////////
 
-// Return only the file name, without the directory path.
+// Get the file name without the directory path.
 static const char *getBaseName(const char *path)
 {
     const char *base = path;
@@ -45,7 +44,7 @@ static const char *getBaseName(const char *path)
 }
 
 
-// Calculate how many bytes are necessary to represent the file size.
+// Calculate how many bytes are needed to store the file size.
 static int fileSizeLength(unsigned long long fileSize)
 {
     int length = 1;
@@ -60,7 +59,7 @@ static int fileSizeLength(unsigned long long fileSize)
 }
 
 
-// Build START or END control packet.
+// Build a START or END packet with the file information.
 //
 // Format:
 //
@@ -86,7 +85,7 @@ static int buildControlPacket(unsigned char control,
     packet[index++] = T_FILE_SIZE;
     packet[index++] = (unsigned char) sizeLength;
 
-    // Store file size in big-endian order.
+    // Store the file size from the most significant byte.
     for (int i = sizeLength - 1; i >= 0; i--)
     {
         packet[index++] =
@@ -124,7 +123,7 @@ static int buildControlPacket(unsigned char control,
 }
 
 
-// Parse START or END control packet.
+// Read the file information from a START or END packet.
 static int parseControlPacket(const unsigned char *packet,
                               int packetSize,
                               unsigned char expectedControl,
@@ -148,7 +147,7 @@ static int parseControlPacket(const unsigned char *packet,
 
     while (index < packetSize)
     {
-        // We need at least T and L.
+        // Check that the type and length fields are present.
         if (index + 2 > packetSize)
             return -1;
 
@@ -172,6 +171,7 @@ static int parseControlPacket(const unsigned char *packet,
 
             unsigned long long size = 0;
 
+            // Rebuild the file size from its bytes.
             for (int i = 0; i < length; i++)
             {
                 size =
@@ -207,7 +207,7 @@ static int parseControlPacket(const unsigned char *packet,
         index += length;
     }
 
-    // File size is mandatory according to the specification.
+    // The file size must be present in the packet.
     if (!foundFileSize)
         return -1;
 
@@ -226,6 +226,7 @@ void applicationLayer(const char *serialPort,
                       int timeout,
                       const char *filename)
 {
+    // Set the parameters used by the link layer.
     LinkLayer llParameters = {
         .baudRate = baudRate,
         .nRetransmissions = nTries,
@@ -270,6 +271,7 @@ void applicationLayer(const char *serialPort,
         // Obtain file size
         ////////////////////////////////////////////////
 
+        // Move to the end of the file to get its size.
         if (fseek(file, 0, SEEK_END) != 0)
         {
             perror("fseek");
@@ -305,6 +307,7 @@ void applicationLayer(const char *serialPort,
         // Send START packet
         ////////////////////////////////////////////////
 
+        // Send the file name and size before the file data.
         unsigned char controlPacket[APP_PACKET_MAX];
 
         int controlPacketSize =
@@ -338,6 +341,7 @@ void applicationLayer(const char *serialPort,
 
         unsigned char fileData[FILE_CHUNK_SIZE];
 
+        // Read the file and send it in chunks.
         while (1)
         {
             size_t bytesRead =
@@ -362,6 +366,7 @@ void applicationLayer(const char *serialPort,
                 dataPacket[2] =
                     (unsigned char) (dataSize % 256);
 
+                // Add the file data after the header.
                 memcpy(&dataPacket[3],
                        fileData,
                        dataSize);
@@ -403,6 +408,7 @@ void applicationLayer(const char *serialPort,
         // Send END packet
         ////////////////////////////////////////////////
 
+        // Send the file information again to mark the end.
         controlPacketSize =
             buildControlPacket(C_END,
                                fileSize,
@@ -467,6 +473,7 @@ void applicationLayer(const char *serialPort,
 
         unsigned char packet[APP_PACKET_MAX + 1];
 
+        // Get the file information from the transmitter.
         int packetSize =
             llReceive(packet);
 
@@ -501,6 +508,7 @@ void applicationLayer(const char *serialPort,
         // Create output file
         ////////////////////////////////////////////////
 
+        // Create the file where the received data will be saved.
         FILE *file =
             fopen(filename, "wb");
 
@@ -550,6 +558,7 @@ void applicationLayer(const char *serialPort,
                     break;
                 }
 
+                // Calculate the number of data bytes in the packet.
                 int dataSize =
                     256 * packet[1] +
                     packet[2];
@@ -564,6 +573,7 @@ void applicationLayer(const char *serialPort,
                     break;
                 }
 
+                // Write the received data to the output file.
                 size_t written =
                     fwrite(&packet[3],
                            1,
@@ -588,6 +598,7 @@ void applicationLayer(const char *serialPort,
 
             else if (packet[0] == C_END)
             {
+                // Read the final file information.
                 if (parseControlPacket(packet,
                                        packetSize,
                                        C_END,
@@ -627,7 +638,7 @@ void applicationLayer(const char *serialPort,
 
         if (transferValid)
         {
-            // END must repeat the information from START.
+            // Check that the START and END information matches.
             if (endFileSize != expectedFileSize)
             {
                 printf("START/END file size mismatch\n");
@@ -641,6 +652,7 @@ void applicationLayer(const char *serialPort,
                 transferValid = 0;
             }
 
+            // Check that all the expected bytes were received.
             if (bytesReceived != expectedFileSize)
             {
                 printf("Received file size is incorrect\n");
@@ -673,7 +685,7 @@ void applicationLayer(const char *serialPort,
         {
             printf("File transfer failed\n");
 
-            // Do not keep an invalid received file.
+            // Remove the output file if the transfer failed.
             remove(filename);
 
             return;
