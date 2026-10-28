@@ -94,12 +94,11 @@ int llOpenTx(LinkLayer llParameters)
         attempts++;
 
         // Envia o frame SET para o recetor
-        int bytesWritten = writeBytesSerialPort(SET, 5);
-        printf("%d bytes written to serial port\n", bytesWritten);
-    
+        writeBytesSerialPort(SET, 5);
+
         // Ativa o alarme durante 3 segundos
         alarmEnabled = TRUE;
-        alarm(protocolTimeout);  
+        alarm(protocolTimeout);
 
         // Tenta receber o UA
 
@@ -112,8 +111,6 @@ int llOpenTx(LinkLayer llParameters)
 
             if (bytesRead != 1)
                 continue;
-
-            printf("Byte received: 0x%02X\n", byte);
 
             switch (state)
             {
@@ -164,7 +161,7 @@ int llOpenTx(LinkLayer llParameters)
             printf("UA received correctly\n");
         }
 
-    }    
+    }
 
     // Se não conseguiu receber um UA válido após 3 tentativas
     if (connected == FALSE)
@@ -218,14 +215,11 @@ int llOpenRx(LinkLayer llParameters)
 
         nBytesBuf += bytes;
 
-        printf("Byte received: 0x%02X\n", byte);
-
         // Let the state machine process the received byte
         stateMachineProcessByte(&sm, byte);
     }
 
     printf("SET received correctly\n");
-    printf("Total bytes received: %d\n", nBytesBuf);
 
     // Build UA frame
     unsigned char uaFrame[5];
@@ -247,7 +241,6 @@ int llOpenRx(LinkLayer llParameters)
         return -1;
     }
 
-    printf("%d bytes written to serial port\n", bytesWritten);
     printf("UA sent\n");
 
     return 0;
@@ -342,9 +335,6 @@ int llSend(const unsigned char *buf, int bufSize)
             return -1;
         }
 
-        printf("I frame sent (Ns=%d, attempt %d)\n",
-               txSequenceNumber, attempts);
-
         alarmEnabled = TRUE;
         alarm(protocolTimeout);
 
@@ -373,8 +363,6 @@ int llSend(const unsigned char *buf, int bufSize)
 
             if (bytesRead == 0)
                 continue;
-
-            printf("Byte received: 0x%02X\n", byte);
 
             switch (state)
             {
@@ -442,8 +430,6 @@ int llSend(const unsigned char *buf, int bufSize)
         {
             if (responseControl == expectedRR)
             {
-                printf("RR received correctly\n");
-
                 // Next I frame will use the other sequence number
                 txSequenceNumber =
                     1 - txSequenceNumber;
@@ -495,8 +481,6 @@ int llReceive(unsigned char *packet)
 
             if (bytesRead == 0)
                 continue;
-
-            printf("Byte received: 0x%02X\n", byte);
 
             switch (state)
             {
@@ -593,9 +577,6 @@ int llReceive(unsigned char *packet)
         int isNewFrame =
             (receivedNs == expectedNs);
 
-        printf("DEBUG: receivedNs=%d, expectedNs=%d, isNewFrame=%d\n",
-                receivedNs, expectedNs, isNewFrame);
-            
         // Destuff DATA + BCC2
         unsigned char data[BUF_SIZE + 1];
         int dataSize = 0;
@@ -697,8 +678,6 @@ int llReceive(unsigned char *packet)
         if (calculatedBCC2 != receivedBCC2)
         {
             unsigned char responseControl;
-            printf("DEBUG BCC2: receivedNs=%d, expectedNs=%d, isNewFrame=%d\n",
-                     receivedNs, expectedNs, isNewFrame);
             if (isNewFrame)
             {
                 // Ask retransmission of the expected frame
@@ -790,10 +769,7 @@ int llReceive(unsigned char *packet)
             perror("writeBytesSerialPort");
             return -1;
         }
-
-        printf("I frame received correctly\n");
-        printf("RR%d sent\n", expectedNs);
-
+        
         return packetSize;
     }
 }
@@ -858,7 +834,6 @@ int llCloseTx()
             if (bytesRead == 0)
                 continue;
 
-            printf("Byte received: 0x%02X\n", byte);
             stateMachineProcessByte(&sm, byte);
         }
 
@@ -927,14 +902,11 @@ int llCloseRx()
             continue;
         }
 
-        printf("Byte received: 0x%02X\n", byte);
-
         // Validate each byte using the state machine
         stateMachineProcessByte(&smDisc, byte);
     }
 
     printf("DISC received correctly\n");
-
 
     // 2. Build DISC frame to send back to transmitter
     unsigned char discFrame[5];
@@ -944,7 +916,6 @@ int llCloseRx()
     discFrame[2] = C_DISC;
     discFrame[3] = A_RX ^ C_DISC;
     discFrame[4] = FLAG;
-
 
     // 3. Send DISC
     int bytesWritten = writeBytesSerialPort(discFrame, 5);
@@ -956,7 +927,6 @@ int llCloseRx()
     }
 
     printf("DISC sent\n");
-
 
     // 4. Receive final UA from transmitter byte by byte
     StateMachine smUa;
@@ -979,14 +949,11 @@ int llCloseRx()
             continue;
         }
 
-        printf("Byte received: 0x%02X\n", byte);
-
         // Again, validate byte by byte
         stateMachineProcessByte(&smUa, byte);
     }
 
     printf("UA received correctly\n");
-
 
     // 5. Close serial port
     if (closeSerialPort() < 0)

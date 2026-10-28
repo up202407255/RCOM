@@ -332,9 +332,6 @@ void applicationLayer(const char *serialPort,
             return;
         }
 
-        printf("START packet sent\n");
-
-
         ////////////////////////////////////////////////
         // Send DATA packets
         ////////////////////////////////////////////////
@@ -431,9 +428,6 @@ void applicationLayer(const char *serialPort,
             return;
         }
 
-        printf("END packet sent\n");
-
-
         ////////////////////////////////////////////////
         // Finish
         ////////////////////////////////////////////////
@@ -497,7 +491,6 @@ void applicationLayer(const char *serialPort,
             return;
         }
 
-        printf("START packet received\n");
         printf("Original file: %s\n",
                receivedFileName);
         printf("Expected file size: %llu bytes\n",
