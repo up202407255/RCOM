@@ -697,7 +697,8 @@ int llReceive(unsigned char *packet)
         if (calculatedBCC2 != receivedBCC2)
         {
             unsigned char responseControl;
-
+            printf("DEBUG BCC2: receivedNs=%d, expectedNs=%d, isNewFrame=%d\n",
+                     receivedNs, expectedNs, isNewFrame);
             if (isNewFrame)
             {
                 // Ask retransmission of the expected frame
