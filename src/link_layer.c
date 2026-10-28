@@ -753,7 +753,7 @@ int llReceive(unsigned char *packet)
                 perror("writeBytesSerialPort");
                 return -1;
             }
-
+            printf("DEBUG: receivedNs=%d, expectedNs=%d\n", receivedNs, expectedNs);
             printf("Duplicate I frame discarded\n");
 
             continue;
