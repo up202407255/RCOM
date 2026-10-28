@@ -593,6 +593,9 @@ int llReceive(unsigned char *packet)
         int isNewFrame =
             (receivedNs == expectedNs);
 
+        printf("DEBUG: receivedNs=%d, expectedNs=%d, isNewFrame=%d\n",
+                receivedNs, expectedNs, isNewFrame);
+            
         // Destuff DATA + BCC2
         unsigned char data[BUF_SIZE + 1];
         int dataSize = 0;
@@ -753,7 +756,7 @@ int llReceive(unsigned char *packet)
                 perror("writeBytesSerialPort");
                 return -1;
             }
-            printf("DEBUG: receivedNs=%d, expectedNs=%d\n", receivedNs, expectedNs);
+
             printf("Duplicate I frame discarded\n");
 
             continue;
