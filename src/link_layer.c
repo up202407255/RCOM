@@ -52,6 +52,11 @@ void alarmHandler(int signal)
 ////////////////////////////////////////////////
 // LLOPEN
 ////////////////////////////////////////////////
+
+// Connection establishment:
+//   TX sends SET and waits for UA, using a timeout/retry mechanism.
+//   RX waits for a valid SET and replies with UA.
+// Sequence numbers are reset here because every new connection starts at I0.
 int llOpenTx(LinkLayer llParameters)
 {
     // Save the connection parameters.
@@ -250,6 +255,11 @@ int llOpenRx(LinkLayer llParameters)
 ////////////////////////////////////////////////
 // LLSEND
 ////////////////////////////////////////////////
+
+// Builds one Information frame from an Application Layer packet.
+// BCC2 is calculated BEFORE stuffing. Bytes FLAG (0x7E) and ESCAPE (0x7D)
+// are escaped in the data field and in BCC2. Stop-and-Wait then waits for
+// the expected RR; timeout or REJ causes retransmission of the same I frame.
 int llSend(const unsigned char *buf, int bufSize)
 {
     // Calculate the XOR of all packet bytes.
@@ -457,6 +467,11 @@ int llSend(const unsigned char *buf, int bufSize)
 ////////////////////////////////////////////////
 // LLRECEIVE
 ////////////////////////////////////////////////
+
+// Receives I frames byte-by-byte, validates BCC1, performs destuffing and
+// checks BCC2. New valid frames are delivered once to the Application Layer.
+// Duplicates are discarded but acknowledged again with RR. A data-field error
+// in a new frame is answered with REJ; a corrupted duplicate is answered RR.
 int llReceive(unsigned char *packet)
 {
     while (1)
@@ -777,6 +792,12 @@ int llReceive(unsigned char *packet)
 ////////////////////////////////////////////////
 // LLCLOSE
 ////////////////////////////////////////////////
+
+// Normal termination handshake:
+//        TX -------- DISC --------> RX
+//        TX <------- DISC --------- RX
+//        TX --------- UA ---------> RX
+// The serial port is closed only after the expected control exchange.
 int llCloseTx()
 {
     // Start the connection closing procedure.

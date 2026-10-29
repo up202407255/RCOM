@@ -2,6 +2,16 @@
 //
 // Application layer protocol implementation
 
+// This layer implements the file-transfer protocol only. It creates/parses
+// START, DATA and END packets and accesses the file system. It deliberately
+// does not know anything about I frames, RR/REJ, BCC, stuffing, sequence
+// numbers or retransmissions; those mechanisms belong exclusively to the
+// Data Link Layer.
+//
+// Packet formats used by this implementation:
+//   START/END -> C | T | L | V | ... (TLV parameters)
+//   DATA      -> C | L2 | L1 | P1 ... Pk
+
 #include "application_layer.h"
 #include "link_layer.h"
 
@@ -25,6 +35,9 @@
 ////////////////////////////////////////////////
 // AUXILIARY FUNCTIONS
 ////////////////////////////////////////////////
+
+// Helpers below only manipulate Application Layer information: file names,
+// file sizes and TLV encoding/decoding. They never inspect link-layer frames.
 
 // Get the file name without the directory path.
 static const char *getBaseName(const char *path)
@@ -67,6 +80,7 @@ static int fileSizeLength(unsigned long long fileSize)
 //
 // T = 0 -> file size
 // T = 1 -> file name
+
 static int buildControlPacket(unsigned char control,
                               unsigned long long fileSize,
                               const char *filename,
@@ -218,6 +232,9 @@ static int parseControlPacket(const unsigned char *packet,
 ////////////////////////////////////////////////
 // APPLICATION LAYER
 ////////////////////////////////////////////////
+
+// TX: open link -> START -> DATA packets -> END -> close link.
+// RX: open link -> receive START -> DATA packets -> END -> validate -> close.
 
 void applicationLayer(const char *serialPort,
                       const char *role,
