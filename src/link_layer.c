@@ -110,7 +110,7 @@ static void printProtocolStatistics(const char *role)
 void alarmHandler(int signal)
 {
     (void) signal;
-    statsTimouts++;
+    statsTimeouts++;
     alarmEnabled = FALSE;
     printf("Timeout. Retrying...\n");
 }
@@ -426,6 +426,13 @@ int llSend(const unsigned char *buf, int bufSize)
             perror("writeBytesSerialPort");
             return -1;
         }
+        // Count every I frame transmission.
+        statsIFramesSent++;
+
+        // From the second attempt onwards, this is a retransmission
+        // of the same Information frame.
+        if (attempts > 1)
+            statsRetransmissions++;
 
         alarmEnabled = TRUE;
         alarm(protocolTimeout);
@@ -810,6 +817,8 @@ int llReceive(unsigned char *packet)
         // Handle a BCC2 error.
         if (calculatedBCC2 != receivedBCC2)
         {
+            statsDataErrors++;
+
             unsigned char responseControl;
             if (isNewFrame)
             {
