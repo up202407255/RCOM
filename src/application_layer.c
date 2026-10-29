@@ -2,32 +2,31 @@
 //
 // Application layer protocol implementation
 
-// This layer implements the file-transfer protocol only. It creates/parses
-// START, DATA and END packets and accesses the file system. It deliberately
-// does not know anything about I frames, RR/REJ, BCC, stuffing, sequence
-// numbers or retransmissions; those mechanisms belong exclusively to the
-// Data Link Layer.
-//
-// Packet formats used by this implementation:
-//   START/END -> C | T | L | V | ... (TLV parameters)
-//   DATA      -> C | L2 | L1 | P1 ... Pk
-
 #include "application_layer.h"
 #include "link_layer.h"
 
 #include <stdio.h>
 #include <string.h>
 
-// Application packet control fields
+// -----------------------------------------------------------------------------
+// APPLICATION PROTOCOL CONSTANTS
+// -----------------------------------------------------------------------------
+// Packet control field C:
+//   START (1) -> announces metadata before file data
+//   DATA  (2) -> carries one fragment of the file
+//   END   (3) -> repeats START metadata to validate the completed transfer
 #define C_START 0x01
 #define C_DATA  0x02
 #define C_END   0x03
 
-// TLV types
+// TLV types used inside START/END control packets:
+//   T = 0 -> file size
+//   T = 1 -> file name
 #define T_FILE_SIZE 0x00
 #define T_FILE_NAME 0x01
 
-// Maximum application packet size and file chunk size
+// Maximum Application packet = 255 bytes. A DATA packet spends 3 bytes on
+// C | L2 | L1, leaving at most 252 bytes for one file fragment.
 #define APP_PACKET_MAX 255
 #define FILE_CHUNK_SIZE 252
 
@@ -78,8 +77,12 @@ static int fileSizeLength(unsigned long long fileSize)
 //
 // C | T1 | L1 | V1 | T2 | L2 | V2
 //
+// In this implementation:
 // T = 0 -> file size
 // T = 1 -> file name
+//
+// START and END carry the same metadata. The Receiver later compares both, 
+// providing an additional Application Layer integrity check.
 
 static int buildControlPacket(unsigned char control,
                               unsigned long long fileSize,
@@ -236,6 +239,21 @@ static int parseControlPacket(const unsigned char *packet,
 // TX: open link -> START -> DATA packets -> END -> close link.
 // RX: open link -> receive START -> DATA packets -> END -> validate -> close.
 
+/*
+ * Layer independence is intentional:
+ *
+ * Application Layer responsibilities:
+ *   - open/read/write the file;
+ *   - create and parse START, DATA and END packets;
+ *   - validate file metadata and final size.
+ *
+ * Link Layer responsibilities (accessed only through llOpen/llSend/llReceive/
+ * llClose): framing, I0/I1 numbering, RR/REJ, BCC1/BCC2, byte stuffing,
+ * timeouts, retransmissions and duplicate detection.
+ *
+ * Therefore this file never needs to know how an Information frame is encoded.
+ */
+
 void applicationLayer(const char *serialPort,
                       const char *role,
                       int baudRate,
@@ -324,7 +342,9 @@ void applicationLayer(const char *serialPort,
         // Send START packet
         ////////////////////////////////////////////////
 
-        // Send the file name and size before the file data.
+        // START is the first Application packet. It announces the file size and
+        // file name before any fragment is sent; llSend() then transports this
+        // complete packet as opaque data inside an I frame.
         unsigned char controlPacket[APP_PACKET_MAX];
 
         int controlPacketSize =
@@ -373,10 +393,15 @@ void applicationLayer(const char *serialPort,
 
                 int dataSize = (int) bytesRead;
 
-                // C = DATA
+                // DATA packet format required by the Application protocol:
+                //
+                //     C | L2 | L1 | P1 ... Pk
+                //
+                // C=2 identifies DATA. L2/L1 encode K, the number of payload
+                // bytes, so the Receiver can validate the packet length.
                 dataPacket[0] = C_DATA;
 
-                // K = 256 * L2 + L1
+                // K = 256 * L2 + L1 (two-octet length field)
                 dataPacket[1] =
                     (unsigned char) (dataSize / 256);
 
@@ -425,7 +450,8 @@ void applicationLayer(const char *serialPort,
         // Send END packet
         ////////////////////////////////////////////////
 
-        // Send the file information again to mark the end.
+        // END repeats exactly the same metadata announced in START. The Receiver
+        // compares both packets and also checks the number of bytes written.
         controlPacketSize =
             buildControlPacket(C_END,
                                fileSize,
@@ -575,13 +601,15 @@ void applicationLayer(const char *serialPort,
                     break;
                 }
 
-                // Calculate the number of data bytes in the packet.
+                // Decode K from the two-byte length field used by DATA packets:
+                // K = 256 * L2 + L1.
                 int dataSize =
                     256 * packet[1] +
                     packet[2];
 
-                // Packet must contain:
-                // C + L2 + L1 + K bytes
+                // A valid DATA packet must contain exactly:
+                // C + L2 + L1 + K data bytes. This is an Application Layer
+                // consistency check, independent from Link Layer BCC2.
                 if (packetSize != dataSize + 3)
                 {
                     printf("Invalid DATA packet size\n");
@@ -655,7 +683,9 @@ void applicationLayer(const char *serialPort,
 
         if (transferValid)
         {
-            // Check that the START and END information matches.
+            // File integrity at the Application Layer is checked in two ways:
+            // 1) START and END must announce identical metadata;
+            // 2) the total number of DATA bytes written must equal the announced size.
             if (endFileSize != expectedFileSize)
             {
                 printf("START/END file size mismatch\n");

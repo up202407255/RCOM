@@ -10,27 +10,42 @@
 #include <unistd.h>
 #include <signal.h>
 
-// MISC
+// -----------------------------------------------------------------------------
+// PROTOCOL CONSTANTS
+// -----------------------------------------------------------------------------
 #define _POSIX_SOURCE 1 // POSIX compliant source
 #define BUF_SIZE 256
 
+// Frame delimiter used to mark the beginning and end of every frame.
 #define FLAG 0x7E
+
+// Address fields.
+// A_TX (0x03): commands sent by the Transmitter and replies sent by the Receiver.
+// A_RX (0x01): commands sent by the Receiver and replies sent by the Transmitter.
 #define A_TX 0x03
 #define A_RX 0x01
+
+// Unnumbered/control frames used to establish and terminate the connection.
 #define C_SET 0x03
 #define C_UA 0x07
-
 #define C_DISC 0x0B
 
+// Information frames. The most significant bit carries N(s), so the protocol
+// alternates between I0 and I1 (Stop-and-Wait with modulo-2 numbering).
 #define C_I0 0x00
 #define C_I1 0x80
 
+// Positive acknowledgements. RRn means: "the next frame I expect is n".
 #define C_RR0 0xAA
 #define C_RR1 0xAB
 
+// Negative acknowledgements. REJn requests retransmission of frame n.
 #define C_REJ0 0x54
 #define C_REJ1 0x55
 
+// PPP-style byte stuffing values:
+//   FLAG   (0x7E) -> 0x7D 0x5E
+//   ESCAPE (0x7D) -> 0x7D 0x5D
 #define ESCAPE 0x7D
 #define ESC_FLAG 0x5E
 #define ESC_ESCAPE 0x5D
@@ -43,8 +58,59 @@ static int expectedNs = 0;
 static int protocolTimeout = 3;
 static int protocolRetransmissions = 3;
 
+// -----------------------------------------------------------------------------
+// PASSIVE PROTOCOL STATISTICS
+// -----------------------------------------------------------------------------
+
+static unsigned long statsIFramesSent = 0;
+static unsigned long statsIFramesReceived = 0;
+static unsigned long statsRetransmissions = 0;
+static unsigned long statsRRSent = 0;
+static unsigned long statsRRReceived = 0;
+static unsigned long statsREJSent = 0;
+static unsigned long statsREJReceived = 0;
+static unsigned long statsDuplicateFrames = 0;
+static unsigned long statsHeaderErrors = 0;
+static unsigned long statsDataErrors = 0;
+static unsigned long statsUsefulBytes = 0;
+static volatile sig_atomic_t statsTimeouts = 0;
+
+static void resetProtocolStatistics(void)
+{
+    statsIFramesSent = 0;
+    statsIFramesReceived = 0;
+    statsRetransmissions = 0;
+    statsRRSent = 0;
+    statsRRReceived = 0;
+    statsREJSent = 0;
+    statsREJReceived = 0;
+    statsDuplicateFrames = 0;
+    statsHeaderErrors = 0;
+    statsDataErrors = 0;
+    statsUsefulBytes = 0;
+    statsTimeouts = 0;
+}
+
+static void printProtocolStatistics(const char *role)
+{
+    printf("\n===== Link Layer Statistics (%s) =====\n", role);
+    printf("I frames sent:            %lu\n", statsIFramesSent);
+    printf("I frames received:        %lu\n", statsIFramesReceived);
+    printf("Retransmissions:          %lu\n", statsRetransmissions);
+    printf("RR sent / received:       %lu / %lu\n", statsRRSent, statsRRReceived);
+    printf("REJ sent / received:      %lu / %lu\n", statsREJSent, statsREJReceived);
+    printf("Duplicate I frames:       %lu\n", statsDuplicateFrames);
+    printf("Header (BCC1) errors:     %lu\n", statsHeaderErrors);
+    printf("Data/destuffing errors:   %lu\n", statsDataErrors);
+    printf("Timeouts:                 %d\n", (int) statsTimeouts);
+    printf("Useful application bytes: %lu\n", statsUsefulBytes);
+    printf("=======================================\n\n");
+}
+
 void alarmHandler(int signal)
 {
+    (void) signal;
+    statsTimouts++;
     alarmEnabled = FALSE;
     printf("Timeout. Retrying...\n");
 }
@@ -59,6 +125,9 @@ void alarmHandler(int signal)
 // Sequence numbers are reset here because every new connection starts at I0.
 int llOpenTx(LinkLayer llParameters)
 {
+    // Start a fresh set os statistics for this connections.
+    resetProtocolStatistics();
+
     // Save the connection parameters.
     protocolTimeout = llParameters.timeout;
     protocolRetransmissions = llParameters.nRetransmissions;
@@ -182,6 +251,9 @@ int llOpenTx(LinkLayer llParameters)
 
 int llOpenRx(LinkLayer llParameters)
 {
+    //Start a fresh set of statistics for this connection.
+    resetProtocolStatistics();
+
     protocolTimeout = llParameters.timeout;
     protocolRetransmissions = llParameters.nRetransmissions;
     expectedNs = 0;
@@ -288,7 +360,10 @@ int llSend(const unsigned char *buf, int bufSize)
     frame[frameSize++] = control;
     frame[frameSize++] = A_TX ^ control;
 
-    // Escape special bytes so they are not confused with FLAG.
+    // PPP-style byte stuffing guarantees transparency of arbitrary binary data:
+    // 0x7E becomes 0x7D 0x5E and 0x7D becomes 0x7D 0x5D.
+    // BCC2 was calculated BEFORE stuffing, exactly as required by the protocol.
+    // (Escape special bytes so they are not confused with FLAG.)
     for (int i = 0; i < bufSize; i++)
     {
         if (buf[i] == FLAG)
@@ -325,9 +400,13 @@ int llSend(const unsigned char *buf, int bufSize)
 
     frame[frameSize++] = FLAG;
 
+    // RR carries N(r), i.e. the number of the NEXT I frame expected by Rx.
+    // Therefore, a correctly received I0 is acknowledged with RR1, while a
+    // correctly received I1 is acknowledged with RR0.
     unsigned char expectedRR =
         (txSequenceNumber == 0) ? C_RR1 : C_RR0;
 
+    // REJ requests retransmission of the current (errored) I frame.
     unsigned char expectedREJ =
         (txSequenceNumber == 0) ? C_REJ0 : C_REJ1;
 
@@ -338,6 +417,7 @@ int llSend(const unsigned char *buf, int bufSize)
     {
         attempts++;
 
+        // attempts > 1 means this exact I frame is being retransmitted.
         int bytesWritten =
             writeBytesSerialPort(frame, frameSize);
 
@@ -442,7 +522,12 @@ int llSend(const unsigned char *buf, int bufSize)
         {
             if (responseControl == expectedRR)
             {
-                // Next I frame will use the other sequence number.
+                statsRRReceived++;
+                statsUsefulBytes += (unsigned long) bufSize;
+
+                // RR1 after I0 (or RR0 after I1) means the frame was accepted.
+                // Only now do we alternate N(s) for the next Information frame.
+                // (Next I frame will use the other sequence number.)
                 txSequenceNumber =
                     1 - txSequenceNumber;
 
@@ -451,6 +536,7 @@ int llSend(const unsigned char *buf, int bufSize)
 
             if (responseControl == expectedREJ)
             {
+                statsREJReceived++;
                 printf("REJ received. Retransmitting...\n");
                 continue;
             }
@@ -468,10 +554,23 @@ int llSend(const unsigned char *buf, int bufSize)
 // LLRECEIVE
 ////////////////////////////////////////////////
 
-// Receives I frames byte-by-byte, validates BCC1, performs destuffing and
-// checks BCC2. New valid frames are delivered once to the Application Layer.
-// Duplicates are discarded but acknowledged again with RR. A data-field error
-// in a new frame is answered with REJ; a corrupted duplicate is answered RR.
+/*
+ * Receives Information frames and implements the Receiver side of Stop-and-Wait.
+ *
+ * For a NEW frame with correct BCC1 and BCC2:
+ *   1. deliver the packet to the Application Layer;
+ *   2. toggle expectedNs;
+ *   3. send RR with the number of the NEXT expected frame.
+ *
+ * For a DUPLICATE frame (normally caused by a lost RR):
+ *   1. do NOT deliver the data to the Application Layer again;
+ *   2. keep expectedNs unchanged;
+ *   3. resend the corresponding RR.
+ *
+ * For a new frame with a valid header but invalid data/BCC2, send REJ so the
+ * transmitter can retransmit immediately instead of waiting for a timeout.
+ */
+
 int llReceive(unsigned char *packet)
 {
     while (1)
@@ -558,7 +657,9 @@ int llReceive(unsigned char *packet)
                     }
                     else
                     {
-                        // Wrong BCC1: ignore the frame.
+                        // Wrong BCC1: the specification says to silently ignore
+                        // the frame because its control information is unreliable.
+                        statsHeaderErrors++;
                         state = 0;
                     }
 
@@ -587,13 +688,22 @@ int llReceive(unsigned char *packet)
             }
         }
 
+        statsIFramesReceived++;
+
         int receivedNs =
             (control == C_I0) ? 0 : 1;
 
         int isNewFrame =
             (receivedNs == expectedNs);
 
-        // Restore the original data bytes.
+            // If N(s) differs from expectedNs, this is a retransmission of a frame
+        // already accepted earlier (typically because its RR was lost).
+
+        if (!isNewFrame)
+            statsDuplicateFrames++;
+
+        // Reverse the byte stuffing before checking BCC2, because BCC2 protects
+        // the ORIGINAL bytes, not their escaped representation on the wire.
         unsigned char data[BUF_SIZE + 1];
         int dataSize = 0;
         int destuffError = FALSE;
@@ -637,9 +747,11 @@ int llReceive(unsigned char *packet)
             }
         }
 
-        // Invalid data field.
+        // Invalid data field. A new frame is rejected; a corrupted duplicate is
+        // acknowledged again because its original copy was already accepted.
         if (destuffError || dataSize < 1)
         {
+            statsDataErrors++;
             unsigned char responseControl;
 
             if (isNewFrame)
@@ -665,6 +777,11 @@ int llReceive(unsigned char *packet)
                 FLAG
             };
 
+            if (responseControl == C_REJ0 || responseControl == C_REJ1){
+                statsREJSent++;}
+            else{
+                statsRRSent++;}
+
             if (writeBytesSerialPort(response, 5) < 0)
             {
                 perror("writeBytesSerialPort");
@@ -674,7 +791,8 @@ int llReceive(unsigned char *packet)
             continue;
         }
 
-        // The last byte after destuffing is BCC2.
+        // The last byte after destuffing is BCC2. BCC2 is the XOR of every
+        // byte in the Application packet transported by this I frame.
         unsigned char receivedBCC2 =
             data[dataSize - 1];
 
@@ -721,6 +839,11 @@ int llReceive(unsigned char *packet)
                 FLAG
             };
 
+            if (responseControl == C_REJ0 || responseControl == C_REJ1)
+                {statsREJSent++;}
+            else
+                {statsRRSent++;}
+
             if (writeBytesSerialPort(response, 5) < 0)
             {
                 perror("writeBytesSerialPort");
@@ -730,7 +853,8 @@ int llReceive(unsigned char *packet)
             continue;
         }
 
-        // Discard duplicate frames and acknowledge them again.
+        // A duplicate must NEVER be delivered twice to the Application Layer.
+        // It is discarded, but RR is sent again so Tx can stop retransmitting it.
         if (!isNewFrame)
         {
             unsigned char rrControl =
@@ -746,6 +870,8 @@ int llReceive(unsigned char *packet)
                 FLAG
             };
 
+            statsRRSent++;
+
             if (writeBytesSerialPort(rrFrame, 5) < 0)
             {
                 perror("writeBytesSerialPort");
@@ -757,13 +883,17 @@ int llReceive(unsigned char *packet)
             continue;
         }
 
-        // Copy the valid packet to the Application Layer.
+        // Only a NEW, error-free frame reaches the Application Layer. This is
+        // what guarantees that a lost RR cannot duplicate bytes in the output file.
         for (int i = 0; i < packetSize; i++)
         {
             packet[i] = data[i];
         }
 
-        // Expect the other sequence number next.
+        statsUsefulBytes+=(unsigned long) packetSize;
+
+        // After accepting I0 we expect I1, so we send RR1. After accepting I1
+        // we expect I0, so we send RR0. RR always announces the NEXT N(s).
         expectedNs = 1 - expectedNs;
 
         unsigned char rrControl =
@@ -778,6 +908,8 @@ int llReceive(unsigned char *packet)
             A_TX ^ rrControl,
             FLAG
         };
+
+        statsRRSent++;
 
         if (writeBytesSerialPort(rrFrame, 5) < 0)
         {
@@ -897,6 +1029,11 @@ int llCloseTx()
     }
 
     printf("Serial port closed\n");
+
+    // Printed only after the protocol has finished; these values never influence
+    // frame processing and are useful during the demonstration/report.
+    printProtocolStatistics("TX");
+
     return 0;
 }
 
@@ -985,6 +1122,10 @@ int llCloseRx()
     }
 
     printf("Serial port closed\n");
+
+    // Receiver-side counters make BCC errors, REJ frames and duplicate handling
+    // directly visible without changing any protocol decision.
+    printProtocolStatistics("RX");
 
     return 0;
 }
