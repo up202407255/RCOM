@@ -241,7 +241,7 @@ int llOpenTx(LinkLayer llParameters)
     // Check if UA was received after all attempts.
     if (connected == FALSE)
     {
-        printf("Failed to receive UA after 3 attempts\n");
+        printf("Failed to receive UA after %d attempts\n", protocolRetransmissions);
         closeSerialPort();
         return -1;
     }
