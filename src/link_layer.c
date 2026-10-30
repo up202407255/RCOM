@@ -7,6 +7,7 @@
 #include "state_machine.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
 
@@ -14,7 +15,10 @@
 // PROTOCOL CONSTANTS
 // -----------------------------------------------------------------------------
 #define _POSIX_SOURCE 1 // POSIX compliant source
-#define BUF_SIZE 256
+
+// Room for the largest packet accepted by the link layer (MAX_PAYLOAD_SIZE)
+// plus BCC2 and some slack.
+#define BUF_SIZE (MAX_PAYLOAD_SIZE + 8)
 
 // Frame delimiter used to mark the beginning and end of every frame.
 #define FLAG 0x7E
@@ -50,7 +54,7 @@
 #define ESC_FLAG 0x5E
 #define ESC_ESCAPE 0x5D
 
-int alarmEnabled = FALSE;
+volatile sig_atomic_t alarmEnabled = FALSE;
 
 static int txSequenceNumber = 0;
 static int expectedNs = 0;
@@ -107,12 +111,37 @@ static void printProtocolStatistics(const char *role)
     printf("=======================================\n\n");
 }
 
+// The handler only touches async-signal-safe state (no printf here).
 void alarmHandler(int signal)
 {
     (void) signal;
     statsTimeouts++;
     alarmEnabled = FALSE;
-    printf("Timeout. Retrying...\n");
+}
+
+// Install SIGALRM handler (without SA_RESTART, so read() returns -1/EINTR
+// when the alarm fires). Needed by BOTH roles.
+static int installAlarmHandler(void)
+{
+    struct sigaction act = {0};
+    act.sa_handler = &alarmHandler;
+
+    return sigaction(SIGALRM, &act, NULL);
+}
+
+// Optional overrides used ONLY for the efficiency experiments, because main.c
+// (which must not be changed) fixes N_TRIES = 3 and TIMEOUT = 4:
+//   RCOM_TRIES   -> maximum number of transmissions per frame
+//   RCOM_TIMEOUT -> timeout in seconds
+static void applyEnvOverrides(void)
+{
+    const char *e;
+
+    if ((e = getenv("RCOM_TRIES")) != NULL && atoi(e) > 0)
+        protocolRetransmissions = atoi(e);
+
+    if ((e = getenv("RCOM_TIMEOUT")) != NULL && atoi(e) > 0)
+        protocolTimeout = atoi(e);
 }
 
 ////////////////////////////////////////////////
@@ -131,6 +160,7 @@ int llOpenTx(LinkLayer llParameters)
     // Save the connection parameters.
     protocolTimeout = llParameters.timeout;
     protocolRetransmissions = llParameters.nRetransmissions;
+    applyEnvOverrides();
     txSequenceNumber = 0;
 
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
@@ -142,10 +172,7 @@ int llOpenTx(LinkLayer llParameters)
     printf("Serial port %s opened\n", llParameters.serialPort);
 
     // Set the alarm handler.
-    struct sigaction act = {0};
-    act.sa_handler = &alarmHandler;
-
-    if (sigaction(SIGALRM, &act, NULL) == -1)
+    if (installAlarmHandler() == -1)
     {
         perror("sigaction");
         return -1;
@@ -235,7 +262,10 @@ int llOpenTx(LinkLayer llParameters)
             alarmEnabled = FALSE;
             printf("UA received correctly\n");
         }
-
+        else
+        {
+            printf("Timeout waiting for UA (attempt %d)\n", attempts);
+        }
     }
 
     // Check if UA was received after all attempts.
@@ -256,6 +286,7 @@ int llOpenRx(LinkLayer llParameters)
 
     protocolTimeout = llParameters.timeout;
     protocolRetransmissions = llParameters.nRetransmissions;
+    applyEnvOverrides();
     expectedNs = 0;
 
     // Open serial port.
@@ -267,11 +298,16 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
+    // The receiver also needs the alarm (used while closing the connection).
+    if (installAlarmHandler() == -1)
+    {
+        perror("sigaction");
+        return -1;
+    }
+
     // Wait for the transmitter to start the connection.
     StateMachine sm;
     stateMachineInit(&sm, A_TX, C_SET);
-
-    int nBytesBuf = 0;
 
     // Wait until a valid SET frame is received.
     while (sm.state != STOP)
@@ -290,8 +326,6 @@ int llOpenRx(LinkLayer llParameters)
         {
             continue;
         }
-
-        nBytesBuf += bytes;
 
         // Let the state machine process the received byte.
         stateMachineProcessByte(&sm, byte);
@@ -334,6 +368,12 @@ int llOpenRx(LinkLayer llParameters)
 // the expected RR; timeout or REJ causes retransmission of the same I frame.
 int llSend(const unsigned char *buf, int bufSize)
 {
+    if (bufSize < 1 || bufSize > MAX_PAYLOAD_SIZE)
+    {
+        printf("Invalid packet size: %d (max %d)\n", bufSize, MAX_PAYLOAD_SIZE);
+        return -1;
+    }
+
     // Calculate the XOR of all packet bytes.
     unsigned char bcc2 = 0x00;
 
@@ -549,7 +589,7 @@ int llSend(const unsigned char *buf, int bufSize)
             }
         }
 
-        printf("No valid acknowledgement received\n");
+        printf("No valid acknowledgement received (timeout)\n");
     }
 
     printf("Failed to send I frame\n");
@@ -576,6 +616,8 @@ int llSend(const unsigned char *buf, int bufSize)
  *
  * For a new frame with a valid header but invalid data/BCC2, send REJ so the
  * transmitter can retransmit immediately instead of waiting for a timeout.
+ *
+ * A repeated SET (the transmitter did not get our UA) is answered with UA.
  */
 
 int llReceive(unsigned char *packet)
@@ -632,10 +674,11 @@ int llReceive(unsigned char *packet)
 
                     break;
 
-                // Waiting for I0 or I1.
+                // Waiting for I0, I1 or (repeated) SET.
                 case 2:
                     if (byte == C_I0 ||
-                        byte == C_I1)
+                        byte == C_I1 ||
+                        byte == C_SET)
                     {
                         control = byte;
                         state = 3;
@@ -676,15 +719,35 @@ int llReceive(unsigned char *packet)
                 case 4:
                     if (byte == FLAG)
                     {
-                        state = 5;
+                        if (control == C_SET)
+                        {
+                            // The Tx repeated SET because our UA was lost:
+                            // answer again and keep waiting for I frames.
+                            unsigned char ua[5] = {
+                                FLAG, A_TX, C_UA, A_TX ^ C_UA, FLAG
+                            };
+
+                            writeBytesSerialPort(ua, 5);
+
+                            stuffedSize = 0;
+                            state = 0;
+                        }
+                        else
+                        {
+                            state = 5;
+                        }
                     }
                     else
                     {
                         if (stuffedSize >=
                             2 * BUF_SIZE + 2)
                         {
-                            printf("Frame too large\n");
-                            return -1;
+                            // Garbage on the line: drop this frame and
+                            // resynchronise instead of aborting the transfer.
+                            statsDataErrors++;
+                            stuffedSize = 0;
+                            state = 0;
+                            break;
                         }
 
                         stuffedData[stuffedSize++] =
@@ -747,10 +810,11 @@ int llReceive(unsigned char *packet)
                     stuffedData[i];
             }
 
-            if (dataSize > BUF_SIZE)
+            // Packet + BCC2 can never exceed MAX_PAYLOAD_SIZE + 1 bytes.
+            if (dataSize > MAX_PAYLOAD_SIZE + 1)
             {
-                printf("Frame too large after destuffing\n");
-                return -1;
+                destuffError = TRUE;
+                break;
             }
         }
 
@@ -951,11 +1015,11 @@ int llCloseTx()
         FLAG, A_RX, C_UA, A_RX ^ C_UA, FLAG
     };
 
-    // Try to close the connection up to 3 times.
+    // Try to close the connection up to protocolRetransmissions times.
     int attempts = 0;
     int discReceived = FALSE;
 
-    while (attempts < 3 && !discReceived)
+    while (attempts < protocolRetransmissions && !discReceived)
     {
         attempts++;
 
@@ -974,7 +1038,7 @@ int llCloseTx()
         stateMachineInit(&sm, A_RX, C_DISC);
 
         alarmEnabled = TRUE;
-        alarm(3);
+        alarm(protocolTimeout);
 
         while (alarmEnabled && sm.state != STOP)
         {
@@ -1030,6 +1094,10 @@ int llCloseTx()
 
     printf("UA sent\n");
 
+    // closeSerialPort() restores the old settings with TCSANOW, which does not
+    // wait for pending output: give the UA time to leave the serial port.
+    sleep(1);
+
     // Close the serial port and restore the original settings.
     if (closeSerialPort() < 0)
     {
@@ -1046,82 +1114,146 @@ int llCloseTx()
     return 0;
 }
 
+// Minimal header recogniser used while closing: it recognises FLAG A C BCC1
+// of ANY frame (the rest of the frame, if any, is skipped until the next FLAG).
+typedef struct
+{
+    int st;
+    unsigned char a;
+    unsigned char c;
+} Header;
+
+// Returns 1 when a header with a valid BCC1 has just been received.
+static int headerFeed(Header *h, unsigned char b)
+{
+    switch (h->st)
+    {
+        case 0:
+            if (b == FLAG)
+                h->st = 1;
+            break;
+
+        case 1:
+            if (b == A_TX || b == A_RX)
+            {
+                h->a = b;
+                h->st = 2;
+            }
+            else if (b != FLAG)
+                h->st = 0;
+            break;
+
+        case 2:
+            if (b == FLAG)
+                h->st = 1;
+            else
+            {
+                h->c = b;
+                h->st = 3;
+            }
+            break;
+
+        case 3:
+            if (b == (h->a ^ h->c))
+            {
+                h->st = 0;
+                return 1;
+            }
+            h->st = (b == FLAG) ? 1 : 0;
+            break;
+    }
+
+    return 0;
+}
+
+// Receiver side of the termination. It must survive lost frames:
+//   - a repeated DISC (our DISC was lost)      -> send DISC again;
+//   - a repeated I frame (our last RR was lost) -> send RR again;
+//   - the final UA never arrives                -> give up after the
+//     configured number of tries and close anyway.
 int llCloseRx()
 {
-    // Wait for the transmitter to start closing the connection.
-    // 1. Receive DISC from transmitter byte by byte
-    StateMachine smDisc;
-    stateMachineInit(&smDisc, A_TX, C_DISC);
+    unsigned char discFrame[5] = {
+        FLAG, A_RX, C_DISC, A_RX ^ C_DISC, FLAG
+    };
 
-    while (smDisc.state != STOP)
+    Header h = {0};
+
+    int sentDisc = FALSE;
+    int done = FALSE;
+    int attempts = 0;
+
+    while (!done)
     {
         unsigned char byte;
+        int n = readByteSerialPort(&byte);
 
-        int bytesRead = readByteSerialPort(&byte);
-
-        if (bytesRead < 0)
+        if (n < 0)
         {
+            // Read interrupted by the alarm: timeout waiting for the final UA.
+            if (sentDisc && !alarmEnabled)
+            {
+                if (++attempts >= protocolRetransmissions)
+                    break;
+
+                writeBytesSerialPort(discFrame, 5);
+                alarmEnabled = TRUE;
+                alarm(protocolTimeout);
+                continue;
+            }
+
             perror("readByteSerialPort");
             return -1;
         }
 
-        if (bytesRead == 0)
-        {
+        if (n == 0)
             continue;
-        }
 
-        // Validate each byte using the state machine.
-        stateMachineProcessByte(&smDisc, byte);
-    }
-
-    printf("DISC received correctly\n");
-
-    // 2. Build DISC frame to send back to transmitter
-    unsigned char discFrame[5];
-
-    discFrame[0] = FLAG;
-    discFrame[1] = A_RX;
-    discFrame[2] = C_DISC;
-    discFrame[3] = A_RX ^ C_DISC;
-    discFrame[4] = FLAG;
-
-    // 3. Send DISC
-    int bytesWritten = writeBytesSerialPort(discFrame, 5);
-
-    if (bytesWritten < 0)
-    {
-        perror("writeBytesSerialPort");
-        return -1;
-    }
-
-    printf("DISC sent\n");
-
-    // 4. Receive final UA from transmitter byte by byte
-    StateMachine smUa;
-    stateMachineInit(&smUa, A_RX, C_UA);
-
-    while (smUa.state != STOP)
-    {
-        unsigned char byte;
-
-        int bytesRead = readByteSerialPort(&byte);
-
-        if (bytesRead < 0)
-        {
-            perror("readByteSerialPort");
-            return -1;
-        }
-
-        if (bytesRead == 0)
-        {
+        if (!headerFeed(&h, byte))
             continue;
-        }
 
-        // Validate each byte using the state machine.
-        stateMachineProcessByte(&smUa, byte);
+        if (h.a == A_TX && h.c == C_DISC)
+        {
+            // DISC (or a repeated DISC): answer with DISC.
+            if (writeBytesSerialPort(discFrame, 5) < 0)
+            {
+                perror("writeBytesSerialPort");
+                return -1;
+            }
+
+            printf("DISC received, DISC sent\n");
+
+            sentDisc = TRUE;
+            attempts = 0;
+            alarmEnabled = TRUE;
+            alarm(protocolTimeout);
+        }
+        else if (h.a == A_TX && (h.c == C_I0 || h.c == C_I1))
+        {
+            // Duplicate I frame: the Tx did not see our last RR.
+            unsigned char rr =
+                (expectedNs == 0) ? C_RR0 : C_RR1;
+
+            unsigned char f[5] = {
+                FLAG, A_TX, rr, A_TX ^ rr, FLAG
+            };
+
+            writeBytesSerialPort(f, 5);
+            statsRRSent++;
+        }
+        else if (sentDisc && h.a == A_RX && h.c == C_UA)
+        {
+            done = TRUE;
+        }
     }
 
-    printf("UA received correctly\n");
+    alarm(0);
+    alarmEnabled = FALSE;
+
+    if (done)
+        printf("UA received correctly\n");
+    else
+        printf("UA not received, closing anyway\n");
 
     // 5. Close serial port
     if (closeSerialPort() < 0)

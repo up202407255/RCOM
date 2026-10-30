@@ -6,7 +6,9 @@
 #include "link_layer.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 // -----------------------------------------------------------------------------
 // APPLICATION PROTOCOL CONSTANTS
@@ -25,10 +27,12 @@
 #define T_FILE_SIZE 0x00
 #define T_FILE_NAME 0x01
 
-// Maximum Application packet = 255 bytes. A DATA packet spends 3 bytes on
-// C | L2 | L1, leaving at most 252 bytes for one file fragment.
-#define APP_PACKET_MAX 255
-#define FILE_CHUNK_SIZE 252
+// Maximum Application packet = MAX_PAYLOAD_SIZE (link_layer.h). A DATA packet
+// spends 3 bytes on C | L2 | L1, leaving at most FILE_CHUNK_MAX bytes for one
+// file fragment. The actual fragment size can be lowered with the environment
+// variable RCOM_CHUNK (used to vary the frame size in the efficiency tests).
+#define APP_PACKET_MAX MAX_PAYLOAD_SIZE
+#define FILE_CHUNK_MAX (APP_PACKET_MAX - 3)
 
 
 ////////////////////////////////////////////////
@@ -81,7 +85,7 @@ static int fileSizeLength(unsigned long long fileSize)
 // T = 0 -> file size
 // T = 1 -> file name
 //
-// START and END carry the same metadata. The Receiver later compares both, 
+// START and END carry the same metadata. The Receiver later compares both,
 // providing an additional Application Layer integrity check.
 
 static int buildControlPacket(unsigned char control,
@@ -334,13 +338,31 @@ void applicationLayer(const char *serialPort,
 
         rewind(file);
 
+        // Size of the file fragment carried by each DATA packet.
+        int chunk = FILE_CHUNK_MAX;
+
+        const char *chunkEnv = getenv("RCOM_CHUNK");
+
+        if (chunkEnv != NULL &&
+            atoi(chunkEnv) >= 1 &&
+            atoi(chunkEnv) <= FILE_CHUNK_MAX)
+        {
+            chunk = atoi(chunkEnv);
+        }
+
         printf("Sending file: %s\n", filename);
         printf("File size: %llu bytes\n", fileSize);
+        printf("Data per packet: %d bytes\n", chunk);
 
 
         ////////////////////////////////////////////////
         // Send START packet
         ////////////////////////////////////////////////
+
+        // Efficiency measurement: the clock runs from the START packet until
+        // the END packet is acknowledged (connection set-up/tear-down excluded).
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
 
         // START is the first Application packet. It announces the file size and
         // file name before any fragment is sent; llSend() then transports this
@@ -376,7 +398,7 @@ void applicationLayer(const char *serialPort,
         // Send DATA packets
         ////////////////////////////////////////////////
 
-        unsigned char fileData[FILE_CHUNK_SIZE];
+        unsigned char fileData[FILE_CHUNK_MAX];
 
         // Read the file and send it in chunks.
         while (1)
@@ -384,7 +406,7 @@ void applicationLayer(const char *serialPort,
             size_t bytesRead =
                 fread(fileData,
                       1,
-                      FILE_CHUNK_SIZE,
+                      chunk,
                       file);
 
             if (bytesRead > 0)
@@ -428,7 +450,7 @@ void applicationLayer(const char *serialPort,
                 }
             }
 
-            if (bytesRead < FILE_CHUNK_SIZE)
+            if (bytesRead < (size_t) chunk)
             {
                 if (ferror(file))
                 {
@@ -476,6 +498,22 @@ void applicationLayer(const char *serialPort,
 
             return;
         }
+
+        // Transfer finished: report time, throughput R and efficiency S = R/C.
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+
+        double secs =
+            (double) (t1.tv_sec - t0.tv_sec) +
+            (double) (t1.tv_nsec - t0.tv_nsec) / 1e9;
+
+        double R = (double) fileSize * 8.0 / secs;
+
+        printf("\n===== Efficiency =====\n");
+        printf("Transfer time: %.3f s\n", secs);
+        printf("Throughput R:  %.1f bit/s\n", R);
+        printf("Baudrate C:    %d bit/s\n", baudRate);
+        printf("Efficiency S:  %.4f\n", R / baudRate);
+        printf("======================\n\n");
 
         ////////////////////////////////////////////////
         // Finish
